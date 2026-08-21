@@ -6,7 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
 import android.location.LocationManager
-import android.os.Build
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -174,7 +173,8 @@ object LifePrefs {
 }
 
 object LifeLocationProvider {
-    private const val MAX_AGE_MS = 10 * 60 * 1000L
+    // No se reutiliza una ubicación antigua: sólo se acepta una lectura muy reciente del teléfono.
+    private const val MAX_AGE_MS = 60_000L
 
     @SuppressLint("MissingPermission")
     fun bestLastKnown(context: Context): LifeLocation? {
@@ -186,7 +186,7 @@ object LifeLocationProvider {
         return listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)
             .mapNotNull { runCatching { manager.getLastKnownLocation(it) }.getOrNull() }
             .filter { valid(it) && now - it.time.coerceAtMost(now) <= MAX_AGE_MS }
-            .maxByOrNull(Location::getTime)
+            .maxByOrNull { it.time }
             ?.let {
                 LifeLocation(it.latitude, it.longitude, it.accuracy.takeIf { _ -> it.hasAccuracy() }, it.time)
             }
@@ -245,8 +245,18 @@ object LifeSender {
     }
 
     fun send(config: LifeConfig, event: PendingLifeEvent) {
-        sendUdp(config, event.udpPayload)
-        sendHttp(config, event)
+        var udpError: Throwable? = null
+        var httpError: Throwable? = null
+        runCatching { sendUdp(config, event.udpPayload) }.onFailure { udpError = it }
+        runCatching { sendHttp(config, event) }.onFailure { httpError = it }
+        if (udpError != null || httpError != null) {
+            throw IOException(
+                listOfNotNull(
+                    udpError?.message?.let { "monitoreo UDP: $it" },
+                    httpError?.message?.let { "NanoSmart Server: $it" }
+                ).joinToString(" | ")
+            )
+        }
     }
 
     private fun sendUdp(config: LifeConfig, payload: String) {
