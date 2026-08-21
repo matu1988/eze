@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
 
+# trigger-build: 2026-08-21
 jobs:
   build-and-test:
     if: github.actor != 'github-actions[bot]'
