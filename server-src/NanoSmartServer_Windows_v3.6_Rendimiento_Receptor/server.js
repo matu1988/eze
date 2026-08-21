@@ -697,8 +697,8 @@ const httpServer = http.createServer(async (req, res) => {
         json(res, 202, { command: commandService.getCommand(created.id, currentInstallation.imei) }); return;
       }
       if (req.method === 'POST' && pathname === '/api/app/life/status') {
-  if (String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON') {
-    throw new RegistryError('Esta ruta requiere una credencial Botón Vida', 403, 'LIFE_CREDENTIAL_REQUIRED');
+  if (!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())) {
+    throw new RegistryError('Esta ruta requiere una credencial válida de NanoSmart', 403, 'LIFE_CREDENTIAL_REQUIRED');
   }
   const body = await readJsonBody(req);
   const statusCode = String(body.status || '').trim().toUpperCase();
