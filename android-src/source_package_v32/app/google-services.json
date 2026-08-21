@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "416065277745",
+    "project_id": "nanosmart-eventos",
+    "storage_bucket": "nanosmart-eventos.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:416065277745:android:d13cecd4de70b99454aa10",
+        "android_client_info": {
+          "package_name": "com.nanocomm.nanosmart.eventos"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCaD3g3ed7nAElVy6DeNbTsrPuyioINXoE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

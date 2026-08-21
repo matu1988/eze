@@ -1,0 +1,45 @@
+NANOSMART SERVER V3.6 - OPTIMIZACION DE RENDIMIENTO
+===================================================
+
+Esta actualizacion conserva los puertos, datos, Firebase, empresas, QR,
+armado/desarmado GPRS, zonas y aplicaciones actuales.
+
+INSTALACION SOBRE EL RECEPTOR ACTUAL
+------------------------------------
+
+1. Cerrar INICIAR_SERVIDOR.bat en el receptor.
+2. Hacer una copia de seguridad de la carpeta actual del servidor.
+3. Descomprimir el ZIP de actualizacion sobre esa carpeta y reemplazar los
+   archivos cuando Windows lo pregunte.
+4. NO borrar ni reemplazar las carpetas data y secrets ni config.json.
+5. Volver a iniciar INICIAR_SERVIDOR.bat.
+6. Abrir http://localhost:18082/api/health y confirmar version 3.6.0.
+
+NO CAMBIA
+---------
+
+- UDP 7050 para equipos GPRS.
+- TCP 18082 para Android/iPhone.
+- TCP 18083 para la estacion de Produccion.
+- Clave de Produccion, base de empresas, IMEI, tokens, nombres de zonas y
+  configuracion Firebase ya guardados.
+- Compatibilidad con el APK NanoSmart que ya esta instalado.
+
+MEJORAS
+-------
+
+- Busqueda directa de tokens y equipos, aun con miles de celulares.
+- Eventos guardados en segundo plano sin demorar el ACK UDP.
+- Escrituras de registro agrupadas para reducir uso de disco.
+- Limite global de 20 conexiones Firebase simultaneas.
+- Consultas agrupadas para la proxima version multipanel de la app.
+
+PRUEBA SIMULADA OPCIONAL
+------------------------
+
+Ejecutar desde una consola dentro de la carpeta del receptor:
+
+  node tools\stress-simulated.js
+
+La prueba no usa Firebase real, no consume mensajes push y no toca los datos
+productivos. Trabaja en una carpeta temporal y la elimina al terminar.

@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simulador de app · NanoSmart</title>
+  <style>
+    :root { color-scheme:dark; --bg:#0b1017; --panel:#131b26; --line:#29384b; --text:#eef4fb; --muted:#91a2b8; --orange:#f57c00; --green:#38d996; --red:#ff5d66; --blue:#5ca9ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top left,#182536,var(--bg) 44%); color:var(--text); font-family:Inter,system-ui,"Segoe UI",sans-serif; }
+    header { padding:22px clamp(18px,5vw,60px); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:18px; }
+    h1,h2,h3,p { margin-top:0; } h1{font-size:24px} h2{font-size:18px} h3{font-size:15px}
+    a { color:#75b9ff; text-decoration:none; }
+    main { width:min(1200px,100%); margin:auto; padding:28px clamp(18px,5vw,60px) 60px; display:grid; grid-template-columns:360px 1fr; gap:20px; }
+    .stack { display:grid; gap:20px; align-content:start; }
+    .panel { background:rgba(19,27,38,.96); border:1px solid var(--line); border-radius:17px; padding:20px; }
+    .notice { grid-column:1/-1; color:#ffc45c; background:rgba(255,196,92,.08); border:1px solid rgba(255,196,92,.25); border-radius:12px; padding:13px 15px; }
+    form { display:grid; gap:10px; }
+    input,button { width:100%; border-radius:10px; border:1px solid var(--line); font:inherit; padding:11px 13px; }
+    input { color:var(--text); background:#0b1017; outline:none; }
+    input:focus { border-color:var(--orange); }
+    button { color:#171009; background:var(--orange); font-weight:800; cursor:pointer; }
+    button.secondary { color:var(--text); background:#1b2939; }
+    button.danger { color:#fff; background:#78232d; }
+    .muted { color:var(--muted); font-size:13px; }
+    .profiles,.alerts { display:grid; gap:10px; margin-top:14px; }
+    .profile,.alert { border:1px solid var(--line); border-radius:12px; padding:13px; }
+    .profile.active { border-color:var(--orange); background:rgba(245,124,0,.07); }
+    .profile-actions { display:flex; gap:8px; margin-top:10px; }
+    .profile-actions button { padding:8px 10px; }
+    .alert { border-left:4px solid var(--red); background:rgba(255,93,102,.05); }
+    .alert-top { display:flex; justify-content:space-between; gap:12px; }
+    .code { color:var(--green); font-family:"Cascadia Code",Consolas,monospace; }
+    .status { margin-top:10px; min-height:20px; color:var(--muted); }
+    .selected { display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid var(--line); padding-bottom:15px; }
+    .selected button { width:auto; }
+    @media(max-width:850px){ main{grid-template-columns:1fr} header{align-items:flex-start;flex-direction:column} }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Simulador de celulares</h1><div class="muted">Vinculación IMEI + clave y consulta autenticada de alertas</div></div>
+    <nav><a href="/">Panel</a> · <a href="/admin">Administración</a></nav>
+  </header>
+  <main>
+    <div class="notice">Los perfiles y tokens se guardan solamente en este navegador para pruebas. Las apps Android y iPhone utilizan almacenamiento propio del teléfono.</div>
+    <div class="stack">
+      <section class="panel">
+        <h2>Vincular nuevo celular</h2>
+        <form id="registerForm">
+          <input id="phoneName" maxlength="80" placeholder="Nombre: Celular de Ezequiel" required>
+          <input id="imei" inputmode="numeric" maxlength="15" pattern="\d{15}" placeholder="IMEI de 15 dígitos" required>
+          <input id="accessKey" autocomplete="off" placeholder="Clave NS-XXXX-XXXX-XXXX-XXXX" required>
+          <button type="submit">Vincular celular</button>
+        </form>
+        <div id="registerStatus" class="status"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Celulares simulados</h2>
+        <div id="profiles" class="profiles"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="selected">
+        <div><h2 id="selectedName">Ningún celular seleccionado</h2><div id="selectedDetail" class="muted">Vinculá o seleccioná un perfil.</div></div>
+        <button id="refresh" class="secondary" type="button">Actualizar</button>
+      </div>
+      <div id="alertStatus" class="status"></div>
+      <div id="alerts" class="alerts"></div>
+    </section>
+  </main>
+  <script>
+    const STORAGE_KEY='nanosmart-simulator-profiles-v1';
+    const SELECTED_KEY='nanosmart-simulator-selected-v1';
+    let profiles=JSON.parse(localStorage.getItem(STORAGE_KEY)||'[]');
+    let selectedId=localStorage.getItem(SELECTED_KEY)||null;
+    const profilesBox=document.getElementById('profiles');
+    const alertsBox=document.getElementById('alerts');
+
+    async function api(url,options={}){
+      const response=await fetch(url,options);
+      const body=await response.json();
+      if(!response.ok) throw new Error(body.error||`Error HTTP ${response.status}`);
+      return body;
+    }
+    function save(){ localStorage.setItem(STORAGE_KEY,JSON.stringify(profiles)); }
+    function selected(){ return profiles.find((profile)=>profile.installationId===selectedId)||null; }
+
+    document.getElementById('registerForm').addEventListener('submit',async(event)=>{
+      event.preventDefault();
+      const status=document.getElementById('registerStatus'); status.textContent='Vinculando…';
+      try{
+        const body={
+          name:document.getElementById('phoneName').value.trim(),
+          imei:document.getElementById('imei').value.trim(),
+          accessKey:document.getElementById('accessKey').value.trim()
+        };
+        const result=await api('/api/app/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+        profiles.push(result); selectedId=result.installationId; save(); localStorage.setItem(SELECTED_KEY,selectedId);
+        status.textContent='Celular vinculado correctamente.'; renderProfiles(); await loadAlerts();
+      }catch(error){status.textContent=error.message;}
+    });
+
+    function renderProfiles(){
+      profilesBox.replaceChildren();
+      for(const profile of profiles){
+        const item=document.createElement('div'); item.className=`profile ${profile.installationId===selectedId?'active':''}`;
+        const name=document.createElement('strong'); name.textContent=profile.name;
+        const detail=document.createElement('div'); detail.className='muted'; detail.textContent=`IMEI ${profile.imei}`;
+        const actions=document.createElement('div'); actions.className='profile-actions';
+        const use=document.createElement('button'); use.className='secondary'; use.textContent='Seleccionar';
+        use.addEventListener('click',async()=>{selectedId=profile.installationId;localStorage.setItem(SELECTED_KEY,selectedId);renderProfiles();await loadAlerts();});
+        const remove=document.createElement('button'); remove.className='danger'; remove.textContent='Quitar local';
+        remove.addEventListener('click',()=>{profiles=profiles.filter((p)=>p.installationId!==profile.installationId);if(selectedId===profile.installationId)selectedId=null;save();renderProfiles();loadAlerts();});
+        actions.append(use,remove); item.append(name,detail,actions); profilesBox.appendChild(item);
+      }
+      if(!profiles.length) profilesBox.innerHTML='<span class="muted">Todavía no hay celulares simulados.</span>';
+    }
+
+    async function loadAlerts(){
+      const profile=selected();
+      document.getElementById('selectedName').textContent=profile?.name||'Ningún celular seleccionado';
+      document.getElementById('selectedDetail').textContent=profile?`IMEI ${profile.imei} · Instalación ${profile.installationId}`:'Vinculá o seleccioná un perfil.';
+      alertsBox.replaceChildren();
+      if(!profile){document.getElementById('alertStatus').textContent='';return;}
+      document.getElementById('alertStatus').textContent='Consultando alertas autorizadas…';
+      try{
+        const data=await api('/api/app/alerts?take=100',{headers:{Authorization:`Bearer ${profile.accessToken}`}});
+        document.getElementById('alertStatus').textContent=data.alerts.length?`${data.alerts.length} alerta(s) para este celular.`:'Sin alertas para este IMEI.';
+        for(const event of data.alerts){
+          const item=document.createElement('div');item.className='alert';
+          const top=document.createElement('div');top.className='alert-top';
+          const title=document.createElement('strong');title.textContent=event.eventDescription;
+          const date=document.createElement('span');date.className='muted';date.textContent=new Date(event.receivedAt).toLocaleString('es-AR');
+          const detail=document.createElement('div');detail.className='muted';detail.textContent=`Partición ${event.partition||'—'} · ${event.subjectKind==='USUARIO'?'Usuario':'Zona'} ${event.subject||'—'} · Abonado ${event.abonado||'—'}`;
+          const code=document.createElement('div');code.className='code';code.textContent=`Evento ${event.eventCode} · IMEI ${event.imei}`;
+          top.append(title,date);item.append(top,detail,code);alertsBox.appendChild(item);
+        }
+      }catch(error){document.getElementById('alertStatus').textContent=error.message;}
+    }
+    document.getElementById('refresh').addEventListener('click',loadAlerts);
+    renderProfiles();loadAlerts();setInterval(()=>{if(selected())loadAlerts();},5000);
+  </script>
+</body>
+</html>

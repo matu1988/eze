@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/m41_dark_bg">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:id="@+id/txtSetupTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:text="Configuración del panel"
+            android:textColor="@color/m41_text_primary"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="18dp"
+            android:orientation="horizontal">
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btnPanelConfigTab"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/bg_tab_selected"
+                android:backgroundTint="@null"
+                android:minHeight="56dp"
+                android:text="Configuración del panel"
+                android:textAllCaps="false"
+                android:textColor="@color/m41_red"
+                android:textSize="13sp" />
+
+            <Space
+                android:layout_width="8dp"
+                android:layout_height="1dp" />
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btnZoneCustomizationTab"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/bg_button_secondary"
+                android:backgroundTint="@null"
+                android:minHeight="56dp"
+                android:text="Personalización de zonas"
+                android:textAllCaps="false"
+                android:textColor="@color/m41_button_text"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/panelConfigContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Nombre para identificar este panel"
+            android:textColor="@color/m41_text_secondary" />
+
+        <EditText
+            android:id="@+id/edtPanelName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Ej: Casa, Oficina o Depósito"
+            android:inputType="textCapWords"
+            android:maxLength="60"
+            android:maxLines="1"
+            android:textColor="@color/m41_text_primary"
+            android:textColorHint="@color/m41_text_secondary" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Modo de servicio"
+            android:textColor="@color/m41_text_primary"
+            android:textStyle="bold" />
+
+        <androidx.appcompat.widget.AppCompatSpinner
+            android:id="@+id/spnServiceMode"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="4dp"
+            android:spinnerMode="dropdown" />
+
+        <TextView
+            android:id="@+id/txtModeDescription"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="Los eventos se enviarán solamente al receptor NanoSmart y a tus celulares."
+            android:textColor="@color/m41_text_secondary"
+            android:textSize="12sp" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/m41_grey_chip" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Conexión con NanoSmart Server"
+            android:textColor="@color/m41_text_primary"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Nombre de la persona o celular"
+            android:textColor="@color/m41_text_secondary" />
+
+        <EditText
+            android:id="@+id/edtNombre"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Ej: Efraín"
+            android:inputType="textPersonName"
+            android:maxLength="80"
+            android:maxLines="1"
+            android:textColor="@color/m41_text_primary"
+            android:textColorHint="@color/m41_text_secondary" />
+
+        <androidx.appcompat.widget.AppCompatButton
+            android:id="@+id/btnScanQr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/bg_tab_selected"
+            android:backgroundTint="@null"
+            android:text="Escanear QR del equipo"
+            android:textAllCaps="false"
+            android:textColor="@color/m41_red"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/txtQrStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="Completá tu nombre y escaneá la etiqueta del equipo. El IMEI y el token se cargarán automáticamente."
+            android:textColor="@color/m41_text_secondary"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Token de este celular"
+            android:textColor="@color/m41_text_secondary" />
+
+        <EditText
+            android:id="@+id/edtToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:autofillHints="password"
+            android:hint="Pegá el token generado por el servidor"
+            android:inputType="textPassword"
+            android:maxLines="1"
+            android:textColor="@color/m41_text_primary"
+            android:textColorHint="@color/m41_text_secondary" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Servidor de alertas configurado internamente"
+            android:textColor="@color/m41_text_secondary"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Identificación del panel"
+            android:textColor="@color/m41_text_primary"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="IMEI"
+            android:textColor="@color/m41_text_secondary" />
+
+        <EditText
+            android:id="@+id/edtImei"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="IMEI de 15 dígitos"
+            android:inputType="number"
+            android:maxLength="15"
+            android:textColor="@color/m41_text_primary"
+            android:textColorHint="@color/m41_text_secondary" />
+
+        <LinearLayout
+            android:id="@+id/abonadoContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Abonado base"
+            android:textColor="@color/m41_text_secondary" />
+
+        <EditText
+            android:id="@+id/edtAbonado"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Ej: ABONADO"
+            android:inputType="text"
+            android:textColor="@color/m41_text_primary"
+            android:textColorHint="@color/m41_text_secondary" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/monitoringFieldsContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="Reporte UDP al software de monitoreo"
+                android:textColor="@color/m41_text_primary"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Clave del equipo (M41)"
+                android:textColor="@color/m41_text_secondary" />
+
+            <EditText
+                android:id="@+id/edtClave"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Clave"
+                android:inputType="textPassword"
+                android:textColor="@color/m41_text_primary"
+                android:textColorHint="@color/m41_text_secondary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="ID"
+                android:textColor="@color/m41_text_secondary" />
+
+            <EditText
+                android:id="@+id/edtId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="ID"
+                android:inputType="text"
+                android:textColor="@color/m41_text_primary"
+                android:textColorHint="@color/m41_text_secondary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="IP destino UDP"
+                android:textColor="@color/m41_text_secondary" />
+
+            <EditText
+                android:id="@+id/edtIp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Ej: 10.110.172.181"
+                android:inputType="textUri"
+                android:textColor="@color/m41_text_primary"
+                android:textColorHint="@color/m41_text_secondary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Puerto destino UDP"
+                android:textColor="@color/m41_text_secondary" />
+
+            <EditText
+                android:id="@+id/edtPort"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Ej: 7050"
+                android:inputType="number"
+                android:textColor="@color/m41_text_primary"
+                android:textColorHint="@color/m41_text_secondary" />
+        </LinearLayout>
+
+        <androidx.appcompat.widget.AppCompatButton
+            android:id="@+id/btnGuardar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:background="@drawable/bg_button_primary"
+            android:backgroundTint="@null"
+            android:text="Guardar y continuar"
+            android:textAllCaps="false"
+            android:textColor="@color/m41_text_secondary" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/zoneCustomizationContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Asigná un nombre a cada zona. Se guardará en el receptor y lo verán todos los celulares conectados a este mismo panel."
+                android:textColor="@color/m41_text_secondary"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/zonesEditorContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="vertical" />
+
+            <TextView
+                android:id="@+id/txtZoneStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="Los campos vacíos seguirán mostrándose con su número de zona."
+                android:textColor="@color/m41_text_secondary"
+                android:textSize="12sp" />
+
+            <androidx.appcompat.widget.AppCompatButton
+                android:id="@+id/btnSaveZones"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_button_primary"
+                android:backgroundTint="@null"
+                android:text="Guardar nombres de zonas"
+                android:textAllCaps="false"
+                android:textColor="@color/m41_text_secondary" />
+        </LinearLayout>
+
+    </LinearLayout>
+</ScrollView>

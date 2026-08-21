@@ -1,0 +1,43 @@
+NANOSMART SERVER V3.6 - RESULTADOS DE PRUEBA SIMULADA
+====================================================
+
+Fecha: 20/08/2026
+Tipo: prueba local totalmente simulada, sin Firebase real y sin costo.
+
+CARGA PRINCIPAL
+---------------
+
+- Equipos registrados: 10.000
+- Autenticaciones de app: 50.000
+- Eventos recibidos/guardados: 20.000
+- Avisos push simulados: 2.000
+- Errores de push: 0
+- Maximo de push simultaneos observado: 20
+- Limite configurado: 20
+- Tiempo total: 2.595,6 ms
+- Memoria RSS al final: 219 MB
+
+RECEPTOR HTTP ENCENDIDO
+-----------------------
+
+- Solicitudes agrupadas: 200
+- Paneles por solicitud: 500
+- Estados de panel devueltos: 100.000
+- Concurrencia: 20 solicitudes
+- Errores: 0
+- Tiempo total: 1.866,8 ms
+- Rendimiento: 53.568 estados de panel por segundo
+- Latencia media aproximada (p50): 174,3 ms
+- Latencia alta (p95): 261,0 ms
+
+PRUEBA GPRS
+-----------
+
+- Paquete UDP recibido correctamente.
+- ACK exacto devuelto correctamente.
+- Evento persistido con escritura asincronica.
+- Escrituras pendientes despues de la prueba: 0.
+
+La prueba cubre capacidad tecnica local. Antes de produccion masiva tambien se
+recomienda medir la red real de AWS, porque su latencia y ancho de banda no se
+pueden reproducir por completo en una prueba local.

@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.NanoSmartEventos" parent="Theme.Material3.Light.NoActionBar">
+        <item name="colorPrimary">@android:color/transparent</item>
+        <item name="colorSecondary">@android:color/transparent</item>
+        <item name="colorTertiary">@android:color/transparent</item>
+        <item name="colorAccent">@android:color/transparent</item>
+        <item name="colorControlActivated">@android:color/transparent</item>
+        <item name="colorControlHighlight">@android:color/transparent</item>
+        <item name="colorButtonNormal">@android:color/transparent</item>
+            <item name="android:navigationBarColor">@color/m41_red</item>
+        <item name="android:statusBarColor">@color/m41_red</item>
+</style>
+</resources>

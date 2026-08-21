@@ -1,0 +1,40 @@
+<resources>
+    <color name="status_armed">#D92D20</color>
+    <color name="status_disarmed">#168A50</color>
+    <color name="white">#FFFFFF</color>
+    <color name="ic_launcher_background">#FFFFFF</color>
+
+    <color name="m41_red">#E52B2F</color>
+    <color name="m41_red_dark">#A90F21</color>
+    <color name="m41_red_light">#FF6467</color>
+    <!-- Fondo general claro -->
+    <color name="m41_dark_bg">#F3F5F9</color>
+    <!-- Tarjetas blancas -->
+    <color name="m41_card_bg">#FFFFFF</color>
+
+    <!-- Texto oscuro para modo día -->
+    <color name="m41_text_primary">#172033</color>
+    <color name="m41_text_secondary">#667085</color>
+
+    <color name="m41_green">#14945A</color>
+    <color name="m41_green_dark">#087443</color>
+    <color name="m41_yellow">#F5A623</color>
+    <!-- Chip gris oscuro para que el texto blanco tenga contraste -->
+    <color name="m41_grey_chip">#424242</color>
+
+    <!-- Colores para botones de eventos -->
+    <color name="m41_blue">#246BCE</color>
+    <color name="m41_blue_dark">#174E9E</color>
+
+    <!-- Botones Armado / Desarmar / Configuración -->
+    <color name="m41_button_bg">#FFFFFF</color>
+    <color name="m41_button_border">#D0D5DD</color>
+    <color name="m41_nav_button_border">#98A2B3</color>
+    <color name="m41_button_text">#344054</color>
+    <color name="m41_divider">#E4E7EC</color>
+    <color name="m41_soft_red">#FFF0F1</color>
+    <color name="m41_soft_green">#ECFDF3</color>
+    <color name="m41_soft_blue">#EFF6FF</color>
+    <color name="m41_shadow">#1A101828</color>
+
+</resources>

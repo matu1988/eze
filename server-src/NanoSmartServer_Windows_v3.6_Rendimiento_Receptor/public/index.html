@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NanoSmart Server</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1017;
+      --panel: #131b26;
+      --panel-2: #192433;
+      --line: #27364a;
+      --text: #eef4fb;
+      --muted: #91a2b8;
+      --orange: #f57c00;
+      --green: #38d996;
+      --red: #ff5d66;
+      --blue: #5ca9ff;
+      --yellow: #ffc45c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: radial-gradient(circle at top left, #182536 0, var(--bg) 42%);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 22px clamp(18px, 4vw, 54px);
+      border-bottom: 1px solid var(--line);
+      background: rgba(11, 16, 23, .86);
+      backdrop-filter: blur(14px);
+      position: sticky;
+      top: 0;
+      z-index: 3;
+    }
+
+    .brand { display: flex; align-items: center; gap: 14px; }
+    .logo {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 12px;
+      background: linear-gradient(145deg, #ff9d2e, var(--orange));
+      color: #171009;
+      font-weight: 900;
+      box-shadow: 0 10px 30px rgba(245, 124, 0, .28);
+    }
+    h1 { margin: 0; font-size: clamp(19px, 2.4vw, 27px); letter-spacing: -.02em; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 3px; }
+
+    .connection {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--red); }
+    .dot.online { background: var(--green); box-shadow: 0 0 0 5px rgba(56, 217, 150, .12); }
+    .header-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+    .header-actions a { color:var(--blue); text-decoration:none; font-size:13px; }
+
+    main { width: min(1500px, 100%); margin: 0 auto; padding: 28px clamp(18px, 4vw, 54px) 54px; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 14px;
+      margin-bottom: 22px;
+    }
+    .card {
+      background: linear-gradient(145deg, rgba(25, 36, 51, .96), rgba(19, 27, 38, .96));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 17px;
+      min-height: 104px;
+    }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    .card .value { margin-top: 11px; font-size: 26px; font-weight: 800; }
+    .card .small { margin-top: 5px; color: var(--muted); font-size: 12px; }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: rgba(19, 27, 38, .94);
+      box-shadow: 0 22px 60px rgba(0, 0, 0, .2);
+    }
+    .panel + .panel { margin-top: 22px; }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 { margin: 0; font-size: 17px; }
+    .filter {
+      width: min(280px, 48vw);
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      outline: none;
+      padding: 10px 12px;
+    }
+    .filter:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(245, 124, 0, .12); }
+
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 1060px; }
+    th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; background: var(--panel-2); }
+    td { font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+    tr.invalid { background: rgba(255, 93, 102, .055); }
+    tr.duplicate { opacity: .62; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .badge.ok { color: var(--green); border-color: rgba(56, 217, 150, .35); }
+    .badge.bad { color: var(--red); border-color: rgba(255, 93, 102, .35); }
+    .badge.warn { color: var(--yellow); border-color: rgba(255, 196, 92, .35); }
+    .badge.dup { color: #ffc45c; margin-left: 5px; }
+
+    code { color: #dce9f8; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
+    details { max-width: 430px; }
+    summary { cursor: pointer; color: var(--blue); }
+    details code { display: block; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 9px; color: var(--muted); }
+
+    .empty { padding: 42px 20px; text-align: center; color: var(--muted); }
+    footer { color: var(--muted); font-size: 12px; margin-top: 16px; text-align: right; }
+
+    @media (max-width: 1000px) { .cards { grid-template-columns: repeat(2, minmax(150px, 1fr)); } }
+    @media (max-width: 620px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .cards { grid-template-columns: 1fr 1fr; }
+      .card:last-child { grid-column: 1 / -1; }
+      .panel-head { align-items: stretch; flex-direction: column; }
+      .filter { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">NS</div>
+      <div>
+        <h1>NanoSmart Server</h1>
+        <div class="subtitle">Receptor de eventos y heartbeat GPRS por IMEI</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <a href="/admin">Administración</a>
+      <a href="/app-simulator">Simulador de app</a>
+      <div class="connection"><span id="streamDot" class="dot"></span><span id="streamText">Conectando eventos…</span></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="cards">
+      <div class="card"><div class="label">Servicio</div><div id="service" class="value">—</div><div id="uptime" class="small">—</div></div>
+      <div class="card"><div class="label">Paquetes</div><div id="total" class="value">0</div><div class="small">recibidos</div></div>
+      <div class="card"><div class="label">Válidos</div><div id="valid" class="value">0</div><div id="invalid" class="small">0 inválidos</div></div>
+      <div class="card"><div class="label">Equipos</div><div id="devices" class="value">0</div><div class="small">IMEI detectados</div></div>
+      <div class="card"><div class="label">Heartbeats</div><div id="heartbeatTotal" class="value">0</div><div id="heartbeatDetail" class="small">esperando IMEI</div></div>
+      <div class="card"><div class="label">Escucha UDP</div><div id="udp" class="value">—</div><div class="small">puerto configurado</div></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Diagnóstico GPRS por IMEI</h2>
+          <div class="subtitle">El heartbeat de 15 dígitos se muestra aquí y no genera ACK.</div>
+        </div>
+        <div id="gprsUpdated" class="subtitle">Esperando actualización…</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Último heartbeat</th>
+              <th>Conexión</th>
+              <th>Estado panel</th>
+              <th>IMEI</th>
+              <th>IP / puerto UDP</th>
+              <th>Recibidos</th>
+              <th>Antigüedad</th>
+              <th>Última comunicación</th>
+              <th>Última orden</th>
+              <th>Mensaje</th>
+            </tr>
+          </thead>
+          <tbody id="gprsRows"></tbody>
+        </table>
+        <div id="gprsEmpty" class="empty">Esperando el primer heartbeat IMEI de 15 dígitos…</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Eventos recibidos en vivo</h2>
+        <input id="filter" class="filter" autocomplete="off" placeholder="Filtrar abonado, IMEI o evento">
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Recepción</th>
+              <th>Estado</th>
+              <th>Abonado</th>
+              <th>IMEI</th>
+              <th>Evento</th>
+              <th>Partición / Z-U</th>
+              <th>ACK</th>
+              <th>Origen</th>
+              <th>Paquete</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+        <div id="empty" class="empty">Esperando el primer paquete UDP…</div>
+      </div>
+    </section>
+    <footer>NanoSmart Server v3.0 · Vinculación QR y zonas compartidas</footer>
+  </main>
+
+  <script>
+    const events = [];
+    const rows = document.getElementById('rows');
+    const empty = document.getElementById('empty');
+    const filter = document.getElementById('filter');
+    const streamDot = document.getElementById('streamDot');
+    const streamText = document.getElementById('streamText');
+    const gprsRows = document.getElementById('gprsRows');
+    const gprsEmpty = document.getElementById('gprsEmpty');
+    let gprsEndpoints = [];
+
+    function textCell(value) {
+      const td = document.createElement('td');
+      td.textContent = value || '—';
+      return td;
+    }
+
+    function formatTime(value) {
+      if (!value) return '—';
+      return new Intl.DateTimeFormat('es-AR', {
+        dateStyle: 'short', timeStyle: 'medium'
+      }).format(new Date(value));
+    }
+
+    function formatAge(seconds) {
+      if (seconds === null || seconds === undefined) return 'Nunca';
+      if (seconds < 5) return 'Ahora';
+      if (seconds < 60) return `Hace ${seconds}s`;
+      const minutes = Math.floor(seconds / 60);
+      const remainder = seconds % 60;
+      return `Hace ${minutes}m ${remainder}s`;
+    }
+
+    function renderGprs() {
+      gprsRows.replaceChildren();
+      gprsEmpty.hidden = gprsEndpoints.length > 0;
+
+      for (const endpoint of gprsEndpoints) {
+        const tr = document.createElement('tr');
+        tr.appendChild(textCell(formatTime(endpoint.lastHeartbeatAt)));
+
+        const status = document.createElement('td');
+        const badge = document.createElement('span');
+        if (!endpoint.heartbeatCount) {
+          badge.className = 'badge warn';
+          badge.textContent = 'Sin heartbeat';
+        } else {
+          badge.className = `badge ${endpoint.online ? 'ok' : 'bad'}`;
+          badge.textContent = endpoint.online ? 'Conectado' : 'Sin comunicación';
+        }
+        status.appendChild(badge);
+        tr.appendChild(status);
+
+        const panel = document.createElement('td');
+        const panelBadge = document.createElement('span');
+        const panelState = endpoint.panelState;
+        if (!panelState) {
+          panelBadge.className = 'badge warn';
+          panelBadge.textContent = 'Sin confirmar';
+        } else {
+          panelBadge.className = `badge ${panelState.panelStatus === 'ARMADO' ? 'bad' : 'ok'}`;
+          panelBadge.textContent = panelState.panelStatus === 'ARMADO' ? 'Armado' : 'Desarmado';
+          panelBadge.title = [panelState.resultDescription, panelState.actorName]
+            .filter(Boolean).join(' · ');
+          if (panelState.alreadyInState) panelBadge.textContent += ' (ya estaba)';
+        }
+        panel.appendChild(panelBadge);
+        tr.appendChild(panel);
+
+        const imei = document.createElement('td');
+        const imeiCode = document.createElement('code');
+        imeiCode.textContent = endpoint.imei;
+        imei.appendChild(imeiCode);
+        tr.appendChild(imei);
+        tr.appendChild(textCell(`${endpoint.address}:${endpoint.port}`));
+        tr.appendChild(textCell(String(endpoint.heartbeatCount || 0)));
+        tr.appendChild(textCell(formatAge(endpoint.heartbeatAgeSeconds)));
+        tr.appendChild(textCell(`${formatTime(endpoint.lastSeenAt)} · ${endpoint.source === 'HEARTBEAT' ? 'Heartbeat' : 'Paquete normal'}`));
+
+        const command = endpoint.latestCommand;
+        tr.appendChild(textCell(command
+          ? `${command.action} · ${command.resultDescription || command.status} · ${command.actorName || 'Sin identificar'} · ${command.attempts} intento(s)`
+          : 'Sin órdenes'));
+
+        const raw = document.createElement('td');
+        const rawCode = document.createElement('code');
+        rawCode.textContent = endpoint.heartbeatCount
+          ? `${endpoint.imei} · sin ACK`
+          : 'IMEI visto dentro de un paquete normal';
+        raw.appendChild(rawCode);
+        tr.appendChild(raw);
+        gprsRows.appendChild(tr);
+      }
+    }
+
+    async function refreshGprs() {
+      try {
+        const response = await fetch('/api/gprs/endpoints', { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        gprsEndpoints = data.endpoints || [];
+        const online = gprsEndpoints.filter((endpoint) => endpoint.online).length;
+        document.getElementById('heartbeatTotal').textContent = data.heartbeatTotal || 0;
+        document.getElementById('heartbeatDetail').textContent = `${gprsEndpoints.length} IMEI · ${online} en línea`;
+        document.getElementById('gprsUpdated').textContent = `Actualizado ${new Intl.DateTimeFormat('es-AR', { timeStyle: 'medium' }).format(new Date())}`;
+        renderGprs();
+      } catch {
+        document.getElementById('gprsUpdated').textContent = 'No se pudo consultar el diagnóstico GPRS';
+      }
+    }
+
+    function eventMatches(event, term) {
+      if (!term) return true;
+      return [event.abonado, event.imei, event.eventCode, event.eventDescription, event.actorName, event.partition, event.subject, event.raw]
+        .some((value) => String(value || '').toLowerCase().includes(term));
+    }
+
+    function render() {
+      const term = filter.value.trim().toLowerCase();
+      rows.replaceChildren();
+      const visible = events.filter((event) => eventMatches(event, term)).slice(0, 150);
+      empty.hidden = visible.length > 0;
+      if (!visible.length) {
+        empty.textContent = events.length ? 'No hay eventos que coincidan con el filtro.' : 'Esperando el primer paquete UDP…';
+      }
+
+      for (const event of visible) {
+        const tr = document.createElement('tr');
+        if (!event.valid) tr.classList.add('invalid');
+        if (event.isDuplicate) tr.classList.add('duplicate');
+        tr.appendChild(textCell(formatTime(event.receivedAt)));
+
+        const status = document.createElement('td');
+        const badge = document.createElement('span');
+        badge.className = `badge ${event.valid ? 'ok' : 'bad'}`;
+        badge.textContent = event.valid ? 'Válido' : 'Inválido';
+        status.appendChild(badge);
+        if (event.isDuplicate) {
+          const dup = document.createElement('span');
+          dup.className = 'badge dup';
+          dup.textContent = 'Duplicado';
+          status.appendChild(dup);
+        }
+        if (event.shouldForwardToApp) {
+          const app = document.createElement('span');
+          app.className = 'badge dup';
+          app.textContent = 'Alerta app';
+          status.appendChild(app);
+        }
+        tr.appendChild(status);
+
+        tr.appendChild(textCell(event.abonado));
+        tr.appendChild(textCell(event.imei));
+        tr.appendChild(textCell(event.actorName
+          ? `${event.eventDescription} · ${event.actorName}`
+          : event.eventDescription));
+        const subjectLabel = event.subjectKind === 'USUARIO' ? 'Usuario' : 'Zona';
+        const zoneNumber = event.subjectNumber || Number.parseInt(event.subject, 10);
+        const subjectText = event.subjectKind === 'ZONA' && event.zoneName && Number.isFinite(zoneNumber)
+          ? `${event.zoneName} (Zona ${zoneNumber})`
+          : `${subjectLabel} ${event.subject || '—'}`;
+        tr.appendChild(textCell(`P ${event.partition || '—'} · ${subjectText}`));
+        tr.appendChild(textCell(event.ackSent ? `ACK=${event.sequence}` : (event.ackError || 'No enviado')));
+        tr.appendChild(textCell(`${event.sourceIp}:${event.sourcePort}`));
+
+        const raw = document.createElement('td');
+        const details = document.createElement('details');
+        const summary = document.createElement('summary');
+        summary.textContent = `${event.rawBytes} bytes`;
+        const code = document.createElement('code');
+        code.textContent = event.raw;
+        details.append(summary, code);
+        raw.appendChild(details);
+        tr.appendChild(raw);
+        rows.appendChild(tr);
+      }
+    }
+
+    function addEvent(event) {
+      if (events.some((item) => item.id === event.id)) return;
+      events.unshift(event);
+      if (events.length > 500) events.length = 500;
+      render();
+    }
+
+    function formatUptime(seconds) {
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor((seconds % 3600) / 60);
+      const secs = seconds % 60;
+      return `${hours}h ${minutes}m ${secs}s activo`;
+    }
+
+    async function refreshHealth() {
+      try {
+        const response = await fetch('/api/health', { cache: 'no-store' });
+        const health = await response.json();
+        document.getElementById('service').textContent = health.ok ? 'En línea' : 'Error';
+        document.getElementById('uptime').textContent = formatUptime(health.uptimeSeconds);
+        document.getElementById('total').textContent = health.stats.totalReceived;
+        document.getElementById('valid').textContent = health.stats.validPackets;
+        document.getElementById('invalid').textContent = `${health.stats.invalidPackets} inválidos · ${health.stats.duplicatePackets} duplicados · ${health.ack.sent} ACK`;
+        document.getElementById('devices').textContent = Math.max(
+          health.stats.devicesDetected,
+          health.gprsControl?.knownEndpoints || 0
+        );
+        document.getElementById('udp').textContent = health.udp.port;
+      } catch {
+        document.getElementById('service').textContent = 'Sin conexión';
+      }
+    }
+
+    async function loadInitialEvents() {
+      const response = await fetch('/api/events?take=150', { cache: 'no-store' });
+      const data = await response.json();
+      events.push(...data.events);
+      render();
+    }
+
+    function connectStream() {
+      const stream = new EventSource('/api/stream');
+      stream.addEventListener('ready', () => {
+        streamDot.classList.add('online');
+        streamText.textContent = 'Eventos en tiempo real';
+      });
+      stream.addEventListener('packet', (message) => {
+        addEvent(JSON.parse(message.data));
+        refreshHealth();
+      });
+      stream.addEventListener('duplicate', refreshHealth);
+      stream.addEventListener('device-heartbeat', () => {
+        refreshGprs();
+        refreshHealth();
+      });
+      stream.addEventListener('device-command', refreshGprs);
+      stream.addEventListener('panel-state', refreshGprs);
+      stream.onerror = () => {
+        streamDot.classList.remove('online');
+        streamText.textContent = 'Reconectando…';
+      };
+    }
+
+    filter.addEventListener('input', render);
+    Promise.all([loadInitialEvents(), refreshHealth(), refreshGprs()]).catch(console.error);
+    connectStream();
+    setInterval(refreshHealth, 5000);
+    setInterval(refreshGprs, 5000);
+  </script>
+</body>
+</html>

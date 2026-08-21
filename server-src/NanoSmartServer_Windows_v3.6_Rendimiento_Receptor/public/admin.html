@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Administración · NanoSmart Server</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1017; --panel:#131b26; --line:#29384b; --text:#eef4fb; --muted:#91a2b8; --orange:#f57c00; --green:#38d996; --red:#ff5d66; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top left,#182536,var(--bg) 44%); color:var(--text); font-family:Inter,system-ui,"Segoe UI",sans-serif; }
+    header { padding:22px clamp(18px,5vw,60px); border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:18px; }
+    h1,h2 { margin:0; } h1 { font-size:24px; } h2 { font-size:18px; }
+    a { color:#75b9ff; text-decoration:none; }
+    main { width:min(1100px,100%); margin:auto; padding:28px clamp(18px,5vw,60px) 60px; display:grid; gap:20px; }
+    .panel { background:rgba(19,27,38,.96); border:1px solid var(--line); border-radius:17px; padding:20px; }
+    .notice { color:#ffc45c; background:rgba(255,196,92,.08); border:1px solid rgba(255,196,92,.25); border-radius:12px; padding:13px 15px; }
+    .form { display:grid; grid-template-columns:1fr auto; gap:12px; margin-top:17px; }
+    .token-form { grid-template-columns:1fr 1fr auto auto; }
+    input,select,button { border-radius:10px; border:1px solid var(--line); font:inherit; padding:11px 13px; }
+    input,select { color:var(--text); background:#0b1017; outline:none; }
+    input:focus,select:focus { border-color:var(--orange); }
+    button { color:#171009; background:var(--orange); font-weight:800; cursor:pointer; }
+    button.secondary { color:var(--text); background:#1b2939; }
+    button.danger { color:#fff; background:#8a2530; }
+    .result { margin-top:16px; padding:16px; border:1px solid rgba(56,217,150,.3); background:rgba(56,217,150,.06); border-radius:12px; display:none; }
+    .key { display:block; margin:10px 0; color:var(--green); font:700 21px "Cascadia Code",Consolas,monospace; overflow-wrap:anywhere; }
+    .muted { color:var(--muted); font-size:13px; }
+    table { width:100%; border-collapse:collapse; margin-top:14px; }
+    th,td { text-align:left; padding:12px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+    th { color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.07em; }
+    .status { margin-top:12px; color:var(--muted); }
+    .phones { margin-top:16px; display:grid; gap:9px; }
+    .phone { border:1px solid var(--line); border-radius:11px; padding:12px; display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    .client-tools { display:grid; grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) auto; gap:12px; margin-top:17px; }
+    .client-check { width:20px; height:20px; padding:0; accent-color:var(--orange); cursor:pointer; }
+    .client-check:disabled { cursor:not-allowed; opacity:.7; }
+    .label-preview { width:50mm; height:25mm; margin:16px 0; padding:2mm; background:#fff; color:#000; display:none; align-items:center; gap:2mm; border:1px solid #aaa; border-radius:2mm; overflow:hidden; }
+    .label-preview .qr { width:21mm; height:21mm; flex:0 0 21mm; }
+    .label-preview .qr svg { display:block; width:21mm; height:21mm; }
+    .label-copy { min-width:0; font-family:Arial,sans-serif; line-height:1.05; }
+    .label-brand { font-size:10pt; font-weight:900; }
+    .label-instruction { margin-top:1.5mm; font-size:6.5pt; font-weight:700; }
+    .label-imei { margin-top:1.5mm; font-size:5.8pt; overflow-wrap:anywhere; }
+    @media(max-width:650px){ .form,.token-form,.client-tools{grid-template-columns:1fr} table{display:block;overflow:auto} header{align-items:flex-start;flex-direction:column} }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Administración NanoSmart</h1><div class="muted">Claves de equipos y celulares vinculados</div></div>
+    <nav><a href="/">Panel</a> · <a href="/app-simulator">Simulador de app</a></nav>
+  </header>
+  <main>
+    <div class="notice">Uso local de pruebas. Esta pantalla todavía no tiene contraseña de administrador y no debe publicarse en Internet.</div>
+
+    <section class="panel">
+      <h2>Crear celular y obtener token</h2>
+      <p class="muted">Ingresá el nombre y el IMEI. Si el equipo todavía no existe, se habilita automáticamente. El resultado es el token que se pega directamente en la app.</p>
+      <form id="phoneForm" class="form token-form">
+        <input id="phoneName" maxlength="80" placeholder="Nombre del celular" value="Celular real" required>
+        <input id="phoneImei" inputmode="numeric" maxlength="15" pattern="\d{15}" placeholder="IMEI de 15 dígitos" required>
+        <select id="phonePlatform" aria-label="Plataforma">
+          <option value="ANDROID">Android</option>
+          <option value="IOS">iPhone</option>
+        </select>
+        <button type="submit">Generar token</button>
+      </form>
+      <div id="phoneTokenResult" class="result">
+        <div>Token para pegar en la app del celular:</div>
+        <code id="phoneTokenValue" class="key"></code>
+        <button id="copyPhoneToken" class="secondary" type="button">Copiar token</button>
+        <p id="phoneTokenDetail" class="muted"></p>
+      </div>
+      <div id="phoneStatus" class="status"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Generar etiqueta QR del equipo</h2>
+      <p class="muted">Ingresá el IMEI completo. El mismo QR sirve para Automonitoreo y Monitoreo; cada celular recibe un token individual.</p>
+      <form id="keyForm" class="form">
+        <input id="imei" inputmode="numeric" maxlength="15" pattern="\d{15}" placeholder="IMEI de 15 dígitos" required>
+        <button type="submit">Generar QR y clave</button>
+      </form>
+      <div id="keyResult" class="result">
+        <div>Clave generada para <strong id="keyImei"></strong>:</div>
+        <code id="keyValue" class="key"></code>
+        <button id="copyKey" class="secondary" type="button">Copiar clave</button>
+        <div id="pairingLabel" class="label-preview">
+          <div id="labelQr" class="qr"></div>
+          <div class="label-copy">
+            <div class="label-brand">NanoSmart RN41</div>
+            <div class="label-instruction">Escaneá este QR desde NanoSmart Eventos</div>
+            <div id="labelImei" class="label-imei"></div>
+          </div>
+        </div>
+        <button id="printLabel" type="button">Imprimir etiqueta 5 × 2,5 cm</button>
+        <p class="muted">Imprimí la etiqueta ahora: el servidor conserva sólo el hash de la clave. Renovarla invalida el QR anterior para nuevas vinculaciones.</p>
+      </div>
+      <div id="keyStatus" class="status"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Empresas y envio de robos a la app</h2>
+      <p class="muted">Esta base pertenece al receptor. Los clientes nuevos quedan habilitados. Automonitoreo siempre recibe los eventos 130 a 139.</p>
+      <div class="client-tools">
+        <input id="clientSearch" placeholder="Buscar por empresa o CA">
+        <input id="clientDbFile" type="file" accept=".db,application/x-sqlite3" aria-label="Base support.db">
+        <button id="importClientDb" type="button">Cargar support.db</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Enviar robos</th><th>Empresa</th><th>CA</th><th>Equipos asignados</th></tr></thead>
+          <tbody id="clientRows"></tbody>
+        </table>
+      </div>
+      <div id="clientsStatus" class="status">Cargando clientes...</div>
+    </section>
+
+    <section class="panel">
+      <h2>Equipos habilitados</h2>
+      <div class="muted">Seleccioná un IMEI para ver sus celulares.</div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>IMEI</th><th>Celulares activos</th><th>Actualización</th><th></th></tr></thead>
+          <tbody id="deviceRows"></tbody>
+        </table>
+      </div>
+      <div id="devicesStatus" class="status">Cargando…</div>
+    </section>
+
+    <section class="panel">
+      <h2>Celulares del IMEI <span id="selectedImei">—</span></h2>
+      <div id="phones" class="phones"><span class="muted">Seleccioná un equipo.</span></div>
+    </section>
+  </main>
+  <script>
+    const phoneForm = document.getElementById('phoneForm');
+    const phoneStatus = document.getElementById('phoneStatus');
+    const phoneTokenResult = document.getElementById('phoneTokenResult');
+    const keyForm = document.getElementById('keyForm');
+    const keyStatus = document.getElementById('keyStatus');
+    const keyResult = document.getElementById('keyResult');
+    const rows = document.getElementById('deviceRows');
+    const phones = document.getElementById('phones');
+    const clientRows = document.getElementById('clientRows');
+    const clientsStatus = document.getElementById('clientsStatus');
+    let allClients = [];
+    let lastPairingLabel = null;
+
+    async function api(url, options = {}) {
+      const response = await fetch(url, options);
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || `Error HTTP ${response.status}`);
+      return body;
+    }
+
+    phoneForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const name = document.getElementById('phoneName').value.trim();
+      const imei = document.getElementById('phoneImei').value.trim();
+      const platform = document.getElementById('phonePlatform').value;
+      phoneStatus.textContent = 'Generando…'; phoneTokenResult.style.display = 'none';
+      try {
+        const result = await api('/api/admin/installations', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({name,imei,platform})
+        });
+        document.getElementById('phoneTokenValue').textContent = result.accessToken;
+        document.getElementById('phoneTokenDetail').textContent = `${result.name} · ${result.platform === 'IOS' ? 'iPhone' : 'Android'} · IMEI ${result.imei} · Pegá este valor en el campo Token y tocá Guardar.`;
+        phoneTokenResult.style.display = 'block'; phoneStatus.textContent = '';
+        await loadDevices(); await loadPhones(result.imei);
+      } catch (error) { phoneStatus.textContent = error.message; }
+    });
+
+    document.getElementById('copyPhoneToken').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(document.getElementById('phoneTokenValue').textContent);
+      phoneStatus.textContent = 'Token copiado. Ya podés pegarlo en el celular.';
+    });
+
+    keyForm.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const imei = document.getElementById('imei').value.trim();
+      keyStatus.textContent = 'Generando…'; keyResult.style.display = 'none';
+      try {
+        const result = await api(`/api/admin/devices/${imei}/access-key`, { method:'POST' });
+        document.getElementById('keyImei').textContent = result.imei;
+        document.getElementById('keyValue').textContent = result.accessKey;
+        document.getElementById('labelQr').innerHTML = result.qrSvg;
+        document.getElementById('labelImei').textContent = `IMEI ${result.imei}`;
+        document.getElementById('pairingLabel').style.display = 'flex';
+        lastPairingLabel = { imei: result.imei, qrSvg: result.qrSvg };
+        keyResult.style.display = 'block'; keyStatus.textContent = '';
+        await loadDevices();
+      } catch (error) { keyStatus.textContent = error.message; }
+    });
+
+    document.getElementById('copyKey').addEventListener('click', async () => {
+      await navigator.clipboard.writeText(document.getElementById('keyValue').textContent);
+      keyStatus.textContent = 'Clave copiada.';
+    });
+
+    document.getElementById('printLabel').addEventListener('click', () => {
+      if (!lastPairingLabel) return;
+      const popup = window.open('', '_blank', 'width=700,height=450');
+      if (!popup) {
+        keyStatus.textContent = 'El navegador bloqueó la ventana de impresión.';
+        return;
+      }
+      popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Etiqueta NanoSmart</title><style>
+        @page{size:50mm 25mm;margin:0}*{box-sizing:border-box}html,body{margin:0;width:50mm;height:25mm;overflow:hidden;background:#fff;color:#000}
+        .label{width:50mm;height:25mm;padding:2mm;display:flex;align-items:center;gap:2mm;font-family:Arial,sans-serif}
+        .qr,.qr svg{display:block;width:21mm;height:21mm;flex:0 0 21mm}.copy{min-width:0;line-height:1.05}.brand{font-size:10pt;font-weight:900}
+        .instruction{margin-top:1.5mm;font-size:6.5pt;font-weight:700}.imei{margin-top:1.5mm;font-size:5.8pt;overflow-wrap:anywhere}
+      </style></head><body><div class="label"><div class="qr">${lastPairingLabel.qrSvg}</div><div class="copy"><div class="brand">NanoSmart RN41</div><div class="instruction">Escaneá este QR desde NanoSmart Eventos</div><div class="imei">IMEI ${lastPairingLabel.imei}</div></div></div><script>onload=()=>{print();setTimeout(()=>close(),500)}<\/script></body></html>`);
+      popup.document.close();
+    });
+
+    function renderClients() {
+      const query = document.getElementById('clientSearch').value.trim().toLocaleLowerCase('es');
+      const filtered = allClients.filter(client => !query ||
+        client.name.toLocaleLowerCase('es').includes(query) ||
+        String(client.account || '').toLocaleLowerCase('es').includes(query) ||
+        String(client.externalId || '').toLocaleLowerCase('es').includes(query));
+      clientRows.replaceChildren();
+      for (const client of filtered) {
+        const tr = document.createElement('tr');
+        const enabledCell = document.createElement('td');
+        const enabled = document.createElement('input');
+        enabled.type = 'checkbox';
+        enabled.className = 'client-check';
+        enabled.checked = client.forwardRobberyToApp === true;
+        enabled.disabled = client.locked === true;
+        enabled.title = client.locked ? 'Automonitoreo siempre esta habilitado' : 'Enviar robos 130 a 139 a la app';
+        enabled.addEventListener('change', async () => {
+          enabled.disabled = true;
+          clientsStatus.textContent = `Guardando ${client.name}...`;
+          try {
+            const result = await api('/api/admin/clients/robbery-forwarding', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({clientId:client.id,enabled:enabled.checked})
+            });
+            client.forwardRobberyToApp = result.client.forwardRobberyToApp;
+            enabled.checked = client.forwardRobberyToApp;
+            clientsStatus.textContent = `${client.name}: configuracion guardada.`;
+          } catch (error) {
+            enabled.checked = client.forwardRobberyToApp;
+            clientsStatus.textContent = error.message;
+          } finally {
+            enabled.disabled = client.locked === true;
+          }
+        });
+        enabledCell.appendChild(enabled);
+        const name = document.createElement('td'); name.textContent = client.locked ? `${client.name} (siempre habilitado)` : client.name;
+        const account = document.createElement('td'); account.textContent = client.account || client.externalId || '-';
+        const devices = document.createElement('td'); devices.textContent = client.assignedDevices || 0;
+        tr.append(enabledCell,name,account,devices); clientRows.appendChild(tr);
+      }
+      clientsStatus.textContent = `${filtered.length} de ${allClients.length} cliente(s).`;
+    }
+
+    async function loadClients() {
+      try {
+        const data = await api('/api/admin/clients');
+        allClients = data.clients || [];
+        renderClients();
+      } catch (error) { clientsStatus.textContent = error.message; }
+    }
+
+    document.getElementById('clientSearch').addEventListener('input', renderClients);
+    document.getElementById('importClientDb').addEventListener('click', async () => {
+      const input = document.getElementById('clientDbFile');
+      const file = input.files && input.files[0];
+      if (!file) { clientsStatus.textContent = 'Seleccione primero el archivo support.db.'; return; }
+      if (!confirm(`Cargar ${file.name} en la base del receptor?`)) return;
+      clientsStatus.textContent = 'Leyendo y cargando support.db...';
+      try {
+        const result = await api('/api/admin/clients/import-support-db', {
+          method:'POST',
+          headers:{'Content-Type':'application/octet-stream'},
+          body:await file.arrayBuffer()
+        });
+        input.value = '';
+        await loadClients();
+        clientsStatus.textContent = `Base actualizada: ${result.inserted} nuevos, ${result.updated} actualizados, ${result.total} en total.`;
+      } catch (error) { clientsStatus.textContent = error.message; }
+    });
+
+    async function loadDevices() {
+      try {
+        const data = await api('/api/admin/devices');
+        rows.replaceChildren();
+        for (const device of data.devices) {
+          const tr = document.createElement('tr');
+          const imei = document.createElement('td'); imei.textContent = device.imei;
+          const count = document.createElement('td'); count.textContent = device.installations;
+          const date = document.createElement('td'); date.textContent = new Date(device.updatedAt).toLocaleString('es-AR');
+          const action = document.createElement('td');
+          const button = document.createElement('button'); button.className='secondary'; button.textContent='Ver celulares';
+          button.addEventListener('click', () => loadPhones(device.imei)); action.appendChild(button);
+          tr.append(imei,count,date,action); rows.appendChild(tr);
+        }
+        document.getElementById('devicesStatus').textContent = data.devices.length ? '' : 'Todavía no hay equipos habilitados.';
+      } catch (error) { document.getElementById('devicesStatus').textContent = error.message; }
+    }
+
+    async function loadPhones(imei) {
+      document.getElementById('selectedImei').textContent = imei;
+      phones.innerHTML = '<span class="muted">Cargando…</span>';
+      try {
+        const data = await api(`/api/admin/devices/${imei}/installations`);
+        phones.replaceChildren();
+        for (const phone of data.installations) {
+          const item = document.createElement('div'); item.className='phone';
+          const info = document.createElement('div');
+          const name = document.createElement('strong'); name.textContent = phone.name;
+          const detail = document.createElement('div'); detail.className='muted'; detail.textContent = `${phone.platform === 'IOS' ? 'iPhone' : 'Android'} · ${phone.installationId} · ${phone.enabled ? 'Activo' : 'Revocado'} · ${phone.hasPushToken ? 'Push listo' : 'Push pendiente'}`;
+          info.append(name,detail); item.appendChild(info);
+          if (phone.enabled) {
+            const revoke = document.createElement('button'); revoke.className='danger'; revoke.textContent='Revocar';
+            revoke.addEventListener('click', async () => {
+              if (!confirm(`¿Revocar ${phone.name}?`)) return;
+              await api(`/api/admin/installations/${encodeURIComponent(phone.installationId)}/revoke`, { method:'POST' });
+              await loadPhones(imei); await loadDevices();
+            });
+            item.appendChild(revoke);
+          }
+          phones.appendChild(item);
+        }
+        if (!data.installations.length) phones.innerHTML='<span class="muted">No hay celulares vinculados.</span>';
+      } catch (error) { phones.textContent = error.message; }
+    }
+    loadClients();
+    loadDevices();
+  </script>
+</body>
+</html>

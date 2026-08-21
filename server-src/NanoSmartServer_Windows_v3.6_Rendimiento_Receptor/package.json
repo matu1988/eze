@@ -1,0 +1,19 @@
+{
+  "name": "nanosmart-server-windows",
+  "version": "3.6.0",
+  "private": true,
+  "description": "Receptor UDP, control GPRS, API y notificaciones FCM para NanoSmart",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "test:udp": "node tools/send-test.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  }
+}

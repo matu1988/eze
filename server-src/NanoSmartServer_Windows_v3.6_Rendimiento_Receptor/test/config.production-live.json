@@ -1,0 +1,45 @@
+{
+  "udp": { "host": "127.0.0.1", "port": 27050, "maxPacketBytes": 8192 },
+  "http": {
+    "host": "127.0.0.1",
+    "port": 28082,
+    "corsOrigin": "*",
+    "restrictAdministrationToPrivateNetworks": true,
+    "maxBatchItems": 500
+  },
+  "storage": {
+    "directory": "test/live-production-data",
+    "registryFile": "test/live-production-data/registry.json",
+    "memoryLimit": 100,
+    "registryFlushMs": 50,
+    "asyncEventPersistence": true
+  },
+  "production": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 28083,
+    "authFailureLimit": 3,
+    "authFailureWindowSeconds": 60,
+    "authBlockSeconds": 60,
+    "keyFile": "test/live-production-data/production-key.txt"
+  },
+  "firebase": { "enabled": false },
+  "commands": { "enabled": false },
+  "protocol": {
+    "startMarker": "$B",
+    "endMarker": "$E",
+    "duplicateWindowSeconds": 300,
+    "packetTypeDescriptions": {},
+    "contactIdEventDescriptions": {},
+    "ack": {
+      "enabled": true,
+      "timeZone": "America/Argentina/Buenos_Aires",
+      "lineEnding": ""
+    },
+    "appForwarding": {
+      "enabled": true,
+      "qualifiers": ["1"],
+      "eventCodes": ["100", "110", "120", "130"]
+    }
+  }
+}

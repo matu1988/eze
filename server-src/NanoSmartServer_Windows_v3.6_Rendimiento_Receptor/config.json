@@ -1,0 +1,65 @@
+{
+  "udp": {
+    "host": "0.0.0.0",
+    "port": 7050,
+    "maxPacketBytes": 8192
+  },
+  "http": {
+    "host": "0.0.0.0",
+    "port": 18082,
+    "corsOrigin": "*",
+    "restrictAdministrationToPrivateNetworks": true,
+    "maxBatchItems": 500
+  },
+  "storage": {
+    "directory": "data",
+    "registryFile": "data/registry.json",
+    "memoryLimit": 5000,
+    "registryFlushMs": 250,
+    "asyncEventPersistence": true
+  },
+  "production": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 18083,
+    "keyFile": "data/production-key.txt",
+    "authFailureLimit": 10,
+    "authFailureWindowSeconds": 300,
+    "authBlockSeconds": 900
+  },
+  "firebase": {
+    "enabled": true,
+    "projectId": "nanosmart-eventos",
+    "serviceAccountFile": "secrets/firebase-service-account.json",
+    "timeoutMs": 10000,
+    "maxConcurrentSends": 20
+  },
+  "commands": {
+    "enabled": true,
+    "inquiryPayload": "$B,DI01,MIC=0,$E",
+    "endpointMaxAgeSeconds": 90,
+    "inquiryRetrySeconds": 45,
+    "commandTtlSeconds": 180
+  },
+  "protocol": {
+    "startMarker": "$B",
+    "endMarker": "$E",
+    "duplicateWindowSeconds": 300,
+    "packetTypeDescriptions": {},
+    "contactIdEventDescriptions": {},
+    "ack": {
+      "enabled": true,
+      "timeZone": "America/Argentina/Buenos_Aires",
+      "lineEnding": ""
+    },
+    "appForwarding": {
+      "enabled": true,
+      "qualifiers": ["1"],
+      "eventCodes": [
+        "100", "110", "120",
+        "130", "131", "132", "133", "134",
+        "135", "136", "137", "138", "139"
+      ]
+    }
+  }
+}
