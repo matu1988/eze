@@ -7,7 +7,7 @@ on:
 permissions:
   contents: write
 
-# trigger-build: gps-fix-2026-08-21
+# trigger-build: gps-fix2-2026-08-21
 jobs:
   build-and-test:
     if: github.actor != 'github-actions[bot]'
@@ -18,28 +18,10 @@ jobs:
           ref: boton-vida-640
           fetch-depth: 0
 
-      - name: Finalize Boton Vida code
+      - name: Apply Boton Vida GPS fix
         shell: python
         run: |
           from pathlib import Path
-
-          server = Path('server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js')
-          s = server.read_text(encoding='utf-8')
-          s = s.replace(
-              "String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON'",
-              "!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())"
-          )
-          s = s.replace(
-              "Esta ruta requiere una credencial Botón Vida",
-              "Esta ruta requiere una credencial válida de NanoSmart"
-          )
-          server.write_text(s, encoding='utf-8')
-
-          core = Path('android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt')
-          t = core.read_text(encoding='utf-8')
-          t = t.replace('append("$B,")', 'append("\\$B,")')
-          t = t.replace('append(",00,10,4G,$E")', 'append(",00,10,4G,\\$E")')
-          core.write_text(t, encoding='utf-8')
 
           integration = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt')
           text = integration.read_text(encoding='utf-8')
@@ -164,35 +146,28 @@ jobs:
 
           service = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt')
           svc = service.read_text(encoding='utf-8')
-          old_callback = '''        LifeButtonLocationProvider.requestFresh(this) { location ->
-              LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
-                  current.copy(locationReady = true, location = location)
-              }
-              flushQueue()
-          }
-          '''
+          cb_start = svc.index('        LifeButtonLocationProvider.requestFresh(this) { location ->')
+          cb_end_marker = '\n        }\n    }\n\n    private fun flushQueue()'
+          cb_end = svc.index(cb_end_marker, cb_start) + len('\n        }')
           new_callback = '''        LifeButtonLocationProvider.requestFresh(this) { location ->
-              fun persistWhenIdle() {
-                  if (flushing.get()) {
-                      mainHandler.postDelayed({ persistWhenIdle() }, 100L)
-                      return
-                  }
-                  LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
-                      current.copy(locationReady = true, location = location)
-                  }
-                  LifeButtonPrefs.setServerState(
-                      this,
-                      config.imei,
-                      if (location != null) "Ubicación obtenida · enviando pedido…" else "Ubicación no disponible · enviando pedido…"
-                  )
-                  flushQueue()
-              }
-              persistWhenIdle()
-          }
-          '''
-          if old_callback not in svc:
-              raise SystemExit('No se encontró callback GPS en LifeButtonService.kt')
-          svc = svc.replace(old_callback, new_callback, 1)
+            fun persistWhenIdle() {
+                if (flushing.get()) {
+                    mainHandler.postDelayed({ persistWhenIdle() }, 100L)
+                    return
+                }
+                LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
+                    current.copy(locationReady = true, location = location)
+                }
+                LifeButtonPrefs.setServerState(
+                    this,
+                    config.imei,
+                    if (location != null) "Ubicación obtenida · enviando pedido…" else "Ubicación no disponible · enviando pedido…"
+                )
+                flushQueue()
+            }
+            persistWhenIdle()
+        }'''
+          svc = svc[:cb_start] + new_callback + svc[cb_end:]
           svc = svc.replace(
               'LifeButtonPrefs.setServerState(this, event.imei, "Pedido enviado")',
               'LifeButtonPrefs.setServerState(this, event.imei, if (event.location != null) "Pedido enviado · ubicación incluida" else "Pedido enviado · sin ubicación")',
@@ -201,17 +176,16 @@ jobs:
           svc = svc.replace('private const val LOCATION_FALLBACK_MS = 10_000L', 'private const val LOCATION_FALLBACK_MS = 12_000L')
           service.write_text(svc, encoding='utf-8')
 
-      - name: Commit finalized source
+      - name: Commit and push corrected source
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js \
-                  android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt \
-                  android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt \
+          git add android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt \
                   android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt
           if ! git diff --cached --quiet; then
-            git commit -m "Fix Botón Vida fresh location acquisition"
+            git commit -m "Fix Botón Vida GPS network and queue handling"
+            git push origin HEAD:boton-vida-640
           fi
 
       - name: Setup Node
@@ -219,7 +193,7 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Install and test server
+      - name: Verify server
         working-directory: server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor
         shell: bash
         run: |
@@ -239,34 +213,34 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build Android apps
+      - name: Build integrated Android app
         working-directory: android-src/source_package_v32
-        run: gradle :app:assembleDebug :vida:assembleDebug --stacktrace
+        run: gradle :app:assembleDebug --stacktrace
 
-      - name: Package projects
+      - name: Package GPS fix
         shell: bash
         run: |
-          rm -rf deliverables
           mkdir -p deliverables
-          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX-debug.apk
-          cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_Standalone_1.0.0-test.apk
-          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
-          (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640_LISTO.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/data/*' '*/secrets/*' '*/server-startup-test.log')
-          printf '%s\n' "Build OK GPS fix $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          printf '%s\n' "Build OK GPSFIX2 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/GPSFIX_BUILD_OK.txt
 
-      - name: Commit deliverables
+      - name: Commit GPS fix deliverables
         shell: bash
         run: |
-          git add -f deliverables
-          if ! git diff --cached --quiet; then
-            git commit -m "Build Botón Vida GPS fix test deliverables"
-          fi
+          git add -f deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk \
+                     deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip \
+                     deliverables/GPSFIX_BUILD_OK.txt
+          git commit -m "Build Botón Vida GPSFIX2 APK" || true
           git push origin HEAD:boton-vida-640
 
-      - name: Upload deliverables
+      - name: Upload GPS fix
         uses: actions/upload-artifact@v4
         with:
-          name: nanosmart-boton-vida-gps-fix
-          path: deliverables/*
+          name: nanosmart-boton-vida-gpsfix2
+          path: |
+            deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk
+            deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip
+            deliverables/GPSFIX_BUILD_OK.txt
           if-no-files-found: error
           retention-days: 14
