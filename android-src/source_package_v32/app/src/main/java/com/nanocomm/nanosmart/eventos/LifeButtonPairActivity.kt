@@ -39,8 +39,18 @@ class LifeButtonPairActivity : SecureActivity() {
     private val permissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {
-        if (hasBlePermissions()) startSearch()
-        else Toast.makeText(this, "Se necesitan permisos Bluetooth para vincular el botón", Toast.LENGTH_LONG).show()
+        if (!hasBlePermissions()) {
+            Toast.makeText(this, "Se necesitan permisos Bluetooth para vincular el botón", Toast.LENGTH_LONG).show()
+            return@registerForActivityResult
+        }
+        if (!hasLocationPermission()) {
+            Toast.makeText(
+                this,
+                "El botón se puede vincular, pero habilitá Ubicación precisa para enviar la posición en una emergencia",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+        startSearch()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +85,7 @@ class LifeButtonPairActivity : SecureActivity() {
             setTextColor(ContextCompat.getColor(this@LifeButtonPairActivity, R.color.m41_text_primary))
         })
         root.addView(TextView(this).apply {
-            text = "La app verificará automáticamente que el dispositivo sea compatible."
+            text = "La app verificará automáticamente que el dispositivo sea compatible. Para enviar la ubicación durante una emergencia, permití también la ubicación precisa."
             textSize = 14f
             setPadding(0, dp(8), 0, dp(18))
             setTextColor(ContextCompat.getColor(this@LifeButtonPairActivity, R.color.m41_text_secondary))
@@ -97,37 +107,54 @@ class LifeButtonPairActivity : SecureActivity() {
 
     private fun renderCurrent() {
         val config = LifeButtonPrefs.config(this, imei)
+        val locationStatus = if (hasLocationPermission()) {
+            " · ubicación habilitada"
+        } else {
+            " · ubicación sin permiso"
+        }
         status.text = if (config.deviceAddress.isBlank()) {
-            "Todavía no hay un botón vinculado a este panel."
+            "Todavía no hay un botón vinculado a este panel.$locationStatus"
         } else {
             val connection = if (LifeButtonPrefs.connected(this, imei)) "conectado" else "guardado"
             val battery = LifeButtonPrefs.battery(this, imei)?.let { " · batería $it%" }.orEmpty()
-            "Botón $connection · ${masked(config.deviceAddress)}$battery"
+            "Botón $connection · ${masked(config.deviceAddress)}$battery$locationStatus"
         }
         button.text = if (config.deviceAddress.isBlank()) "Buscar botón" else "Cambiar botón"
     }
 
     private fun requestSearch() {
-        if (!hasBlePermissions()) {
+        if (!hasBlePermissions() || !hasLocationPermission()) {
             val needed = mutableListOf<String>()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                needed += Manifest.permission.BLUETOOTH_SCAN
-                needed += Manifest.permission.BLUETOOTH_CONNECT
-            } else {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                    needed += Manifest.permission.BLUETOOTH_SCAN
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                    needed += Manifest.permission.BLUETOOTH_CONNECT
+                }
+            }
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 needed += Manifest.permission.ACCESS_FINE_LOCATION
             }
-            permissionsLauncher.launch(needed.toTypedArray())
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                needed += Manifest.permission.ACCESS_COARSE_LOCATION
+            }
+            permissionsLauncher.launch(needed.distinct().toTypedArray())
             return
         }
         startSearch()
     }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
     private fun hasBlePermissions(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
                 ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
         } else {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            hasLocationPermission()
         }
     }
 
