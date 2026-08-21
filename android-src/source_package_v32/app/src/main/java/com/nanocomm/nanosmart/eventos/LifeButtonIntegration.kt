@@ -337,8 +337,9 @@ object LifeButtonSender {
 }
 
 object LifeButtonLocationProvider {
-    private const val TIMEOUT_MS = 8_000L
-    private const val MAX_RETURNED_AGE_MS = 30_000L
+    private const val TIMEOUT_MS = 10_000L
+    private const val MAX_CURRENT_AGE_MS = 60_000L
+    private const val MAX_FALLBACK_AGE_MS = 60_000L
 
     @SuppressLint("MissingPermission")
     fun requestFresh(context: Context, callback: (EmergencyLocation?) -> Unit) {
@@ -353,66 +354,99 @@ object LifeButtonLocationProvider {
         }
 
         val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val provider = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-            .firstOrNull { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) }
-        if (provider == null) {
-            callback(null)
+        val enabledProviders = buildList {
+            if (runCatching { manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
+                add(LocationManager.NETWORK_PROVIDER)
+            }
+            if (runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) {
+                add(LocationManager.GPS_PROVIDER)
+            }
+        }.distinct()
+
+        fun accepted(location: Location?, maxAgeMs: Long): EmergencyLocation? {
+            if (location == null) return null
+            val now = System.currentTimeMillis()
+            val capturedAt = location.time.takeIf { it > 0L } ?: now
+            val age = (now - capturedAt.coerceAtMost(now)).coerceAtLeast(0L)
+            if (age > maxAgeMs) return null
+            if (!EmergencyLocationPolicy.validCoordinates(location.latitude, location.longitude)) return null
+            return EmergencyLocation(
+                latitude = location.latitude,
+                longitude = location.longitude,
+                accuracyMeters = location.accuracy.takeIf { location.hasAccuracy() },
+                capturedAtMillis = capturedAt
+            )
+        }
+
+        fun recentLastKnown(): EmergencyLocation? {
+            val candidates = listOf(
+                LocationManager.NETWORK_PROVIDER,
+                LocationManager.GPS_PROVIDER,
+                LocationManager.PASSIVE_PROVIDER
+            ).mapNotNull { provider ->
+                runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
+            }.mapNotNull { accepted(it, MAX_FALLBACK_AGE_MS) }
+            return candidates.minWithOrNull(
+                compareBy<EmergencyLocation> { it.accuracyMeters ?: Float.MAX_VALUE }
+                    .thenByDescending { it.capturedAtMillis }
+            )
+        }
+
+        if (enabledProviders.isEmpty()) {
+            callback(recentLastKnown())
             return
         }
 
         val delivered = AtomicBoolean(false)
         val handler = Handler(Looper.getMainLooper())
-        fun finish(location: Location?) {
+        val cancellations = mutableListOf<CancellationSignal>()
+
+        fun finish(location: EmergencyLocation?) {
             if (!delivered.compareAndSet(false, true)) return
-            val now = System.currentTimeMillis()
-            val accepted = location?.takeIf {
-                EmergencyLocationPolicy.validCoordinates(it.latitude, it.longitude) &&
-                    (it.time <= 0L || now - it.time.coerceAtMost(now) <= MAX_RETURNED_AGE_MS)
-            }?.let {
-                EmergencyLocation(
-                    latitude = it.latitude,
-                    longitude = it.longitude,
-                    accuracyMeters = it.accuracy.takeIf { _ -> it.hasAccuracy() },
-                    capturedAtMillis = it.time.takeIf { time -> time > 0L } ?: now
-                )
-            }
-            callback(accepted)
+            cancellations.forEach { runCatching { it.cancel() } }
+            callback(location ?: recentLastKnown())
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val cancellation = CancellationSignal()
-            handler.postDelayed({
-                cancellation.cancel()
-                finish(null)
-            }, TIMEOUT_MS)
-            runCatching {
-                manager.getCurrentLocation(
-                    provider,
-                    cancellation,
-                    ContextCompat.getMainExecutor(appContext)
-                ) { location -> finish(location) }
-            }.onFailure { finish(null) }
+            enabledProviders.forEach { provider ->
+                val cancellation = CancellationSignal()
+                cancellations += cancellation
+                runCatching {
+                    manager.getCurrentLocation(
+                        provider,
+                        cancellation,
+                        ContextCompat.getMainExecutor(appContext)
+                    ) { location ->
+                        accepted(location, MAX_CURRENT_AGE_MS)?.let(::finish)
+                    }
+                }
+            }
+            handler.postDelayed({ finish(null) }, TIMEOUT_MS)
             return
         }
 
         @Suppress("DEPRECATION")
         val listener = object : android.location.LocationListener {
             override fun onLocationChanged(location: Location) {
-                runCatching { manager.removeUpdates(this) }
-                finish(location)
+                accepted(location, MAX_CURRENT_AGE_MS)?.let {
+                    runCatching { manager.removeUpdates(this) }
+                    finish(it)
+                }
             }
             override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) = Unit
             override fun onProviderEnabled(provider: String) = Unit
             override fun onProviderDisabled(provider: String) = Unit
         }
+        enabledProviders.forEach { provider ->
+            runCatching {
+                @Suppress("DEPRECATION")
+                manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+            }
+        }
         handler.postDelayed({
             runCatching { manager.removeUpdates(listener) }
             finish(null)
         }, TIMEOUT_MS)
-        runCatching {
-            @Suppress("DEPRECATION")
-            manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
-        }.onFailure { finish(null) }
     }
 }
 
