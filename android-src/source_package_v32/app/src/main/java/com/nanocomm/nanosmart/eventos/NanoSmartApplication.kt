@@ -16,6 +16,9 @@ class NanoSmartApplication : Application() {
                 AppVisibility.activityStarted()
                 if (!wasForeground) AppLockState.appEnteredForeground()
                 AudibleAlarmService.stop(activity)
+                if (!DemoMode.enabled && LifeButtonPrefs.enabledConfigs(activity).isNotEmpty()) {
+                    LifeButtonService.start(activity)
+                }
             }
 
             override fun onActivityStopped(activity: Activity) {
@@ -23,8 +26,14 @@ class NanoSmartApplication : Application() {
                 if (!AppVisibility.isForeground) AppLockState.appEnteredBackground()
             }
 
-            override fun onActivityCreated(activity: Activity, state: Bundle?) = Unit
-            override fun onActivityResumed(activity: Activity) = Unit
+            override fun onActivityCreated(activity: Activity, state: Bundle?) {
+                if (activity is SetupActivity) LifeButtonSetupUi.install(activity)
+            }
+
+            override fun onActivityResumed(activity: Activity) {
+                if (activity is SetupActivity) LifeButtonSetupUi.refresh(activity)
+            }
+
             override fun onActivityPaused(activity: Activity) = Unit
             override fun onActivitySaveInstanceState(activity: Activity, state: Bundle) = Unit
             override fun onActivityDestroyed(activity: Activity) = Unit
