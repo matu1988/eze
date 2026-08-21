@@ -7,7 +7,7 @@ on:
 permissions:
   contents: write
 
-# trigger-build: integrated-main-app-2026-08-21
+# trigger-build: server-runtime-dependencies-2026-08-21
 jobs:
   build-and-test:
     if: github.actor != 'github-actions[bot]'
@@ -114,11 +114,31 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Test server
+      - name: Install and test server
         working-directory: server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor
+        shell: bash
         run: |
+          npm ci --omit=dev
+          node -e "require('qrcode'); require('./src/pairing')"
           node --check server.js
           npm test
+          node server.js > server-startup-test.log 2>&1 &
+          SERVER_PID=$!
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 0.5
+          done
+          if [ "$READY" -ne 1 ]; then
+            cat server-startup-test.log
+            kill "$SERVER_PID" 2>/dev/null || true
+            exit 1
+          fi
+          kill "$SERVER_PID" 2>/dev/null || true
+          wait "$SERVER_PID" 2>/dev/null || true
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -143,15 +163,15 @@ jobs:
           cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_Integrado-debug.apk
           cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_Standalone_1.0.0-test.apk
           (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_Integrado_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
-          (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/node_modules/*' '*/data/*' '*/secrets/*')
-          printf '%s\n' "Build OK integrated main app $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
+          (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640_LISTO.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/data/*' '*/secrets/*' '*/server-startup-test.log')
+          printf '%s\n' "Build OK integrated app + runnable server $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
 
       - name: Commit deliverables
         shell: bash
         run: |
           git add -f deliverables
           if ! git diff --cached --quiet; then
-            git commit -m "Build integrated Botón Vida test deliverables"
+            git commit -m "Build runnable NanoSmart server package"
           fi
           git push origin HEAD:boton-vida-640
 
