@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const KEY_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const AUTOMONITORING_CLIENT_ID = 'automonitoreo';
+const LIFE_PURPOSE = 'LIFE_BUTTON';
 const ROBBERY_EVENT_CODES = new Set(['130', '131', '132', '133', '134', '135', '136', '137', '138', '139']);
 
 class RegistryError extends Error {
@@ -188,6 +189,9 @@ class DeviceRegistry {
     for (const device of Object.values(this.data.devices)) {
       if (!device.clientId) device.clientId = AUTOMONITORING_CLIENT_ID;
     }
+    for (const installation of Object.values(this.data.installations)) {
+      if (!installation.purpose) installation.purpose = 'MOBILE';
+    }
     this.#rebuildIndexes();
     this.#save(true);
   }
@@ -276,7 +280,7 @@ class DeviceRegistry {
       this.installationByTokenHash.set(installation.tokenHash, installation);
     }
     this.#changeCount(this.enabledInstallationCountByImei, installation.imei, 1);
-    if (installation.pushToken) {
+    if (installation.pushToken && installation.purpose !== LIFE_PURPOSE) {
       this.pushTokenOwnerByDevice.set(
         this.#pushOwnerKey(installation.imei, installation.pushToken),
         installation.installationId
@@ -298,7 +302,7 @@ class DeviceRegistry {
       this.installationByTokenHash.delete(installation.tokenHash);
     }
     this.#changeCount(this.enabledInstallationCountByImei, installation.imei, -1);
-    if (installation.pushToken) {
+    if (installation.pushToken && installation.purpose !== LIFE_PURPOSE) {
       const ownerKey = this.#pushOwnerKey(installation.imei, installation.pushToken);
       if (this.pushTokenOwnerByDevice.get(ownerKey) === installation.installationId) {
         this.pushTokenOwnerByDevice.delete(ownerKey);
@@ -382,6 +386,35 @@ class DeviceRegistry {
   registerInstallation(input = {}) {
     const imei = validateImei(input.imei);
     const pairingSlot = this.#findPairingSlot(imei, input.accessKey);
+    const purpose = String(input.purpose || 'MOBILE').trim().toUpperCase();
+
+    if (purpose === LIFE_PURPOSE) {
+      if (pairingSlot) {
+        pairingSlot.lastUsedAt = new Date().toISOString();
+      } else {
+        this.verifyAccessKey(imei, input.accessKey);
+      }
+      const deviceIdentifier = String(input.deviceIdentifier || '').trim().slice(0, 160);
+      if (deviceIdentifier.length < 6) {
+        throw new RegistryError(
+          'Falta la identificación del dispositivo Botón Vida',
+          400,
+          'MISSING_LIFE_DEVICE_ID'
+        );
+      }
+      const suffix = crypto.createHash('sha256')
+        .update(`${imei}\u0000${deviceIdentifier}`)
+        .digest('hex')
+        .slice(0, 32);
+      return this.#createInstallation(imei, {
+        ...input,
+        installationId: `life:${suffix}`,
+        name: input.name || `Botón Vida ${imei.slice(-4)}`,
+        purpose: LIFE_PURPOSE,
+        pushToken: null
+      });
+    }
+
     if (pairingSlot) {
       pairingSlot.lastUsedAt = new Date().toISOString();
       return this.#createInstallation(imei, {
@@ -608,7 +641,10 @@ class DeviceRegistry {
     const now = new Date().toISOString();
     const accessToken = crypto.randomBytes(32).toString('base64url');
     const name = String(input.name || previous?.name || 'Celular sin nombre').trim().slice(0, 80);
-    const pushToken = input.pushToken ? String(input.pushToken).trim().slice(0, 4096) : (previous?.pushToken || null);
+    const purpose = String(input.purpose || previous?.purpose || 'MOBILE').trim().toUpperCase();
+    const pushToken = purpose === LIFE_PURPOSE
+      ? null
+      : (input.pushToken ? String(input.pushToken).trim().slice(0, 4096) : (previous?.pushToken || null));
     const platform = normalizePlatform(input.platform, previous?.platform || 'ANDROID');
 
     this.#unindexInstallation(previous);
@@ -617,6 +653,7 @@ class DeviceRegistry {
       imei,
       name,
       platform,
+      purpose,
       enabled: true,
       pushToken,
       tokenHash: tokenHash(accessToken),
@@ -632,6 +669,7 @@ class DeviceRegistry {
       imei,
       name,
       platform,
+      purpose,
       accessToken,
       tokenType: 'Bearer',
       createdAt: this.data.installations[installationId].createdAt
@@ -650,6 +688,7 @@ class DeviceRegistry {
     return {
       ...installation,
       platform: installation.platform || 'ANDROID',
+      purpose: installation.purpose || 'MOBILE',
       tokenHash: undefined
     };
   }
@@ -660,6 +699,13 @@ class DeviceRegistry {
       throw new RegistryError('Instalación no encontrada', 404, 'INSTALLATION_NOT_FOUND');
     }
     const normalizedPushToken = String(pushToken || '').trim().slice(0, 4096) || null;
+    if ((installation.purpose || 'MOBILE') === LIFE_PURPOSE && normalizedPushToken) {
+      throw new RegistryError(
+        'La instalación Botón Vida no recibe notificaciones push',
+        409,
+        'LIFE_PUSH_NOT_ALLOWED'
+      );
+    }
     const now = new Date().toISOString();
     this.#unindexInstallation(installation);
     if (normalizedPushToken) {
@@ -767,7 +813,7 @@ class DeviceRegistry {
     const normalizedImei = validateImei(imei);
     return [...(this.installationIdsByImei.get(normalizedImei) || [])]
       .map((installationId) => this.data.installations[installationId])
-      .filter((item) => item?.enabled && item.pushToken)
+      .filter((item) => item?.enabled && item.pushToken && (item.purpose || 'MOBILE') !== LIFE_PURPOSE)
       .map((item) => ({
         installationId: item.installationId,
         pushToken: item.pushToken,
@@ -822,6 +868,7 @@ class DeviceRegistry {
       imei: installation.imei,
       name: installation.name,
       platform: installation.platform || 'ANDROID',
+      purpose: installation.purpose || 'MOBILE',
       enabled: installation.enabled,
       hasPushToken: Boolean(installation.pushToken),
       createdAt: installation.createdAt,
