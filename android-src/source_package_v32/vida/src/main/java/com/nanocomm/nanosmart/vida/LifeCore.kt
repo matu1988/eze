@@ -282,7 +282,7 @@ object LifePacketBuilder {
         val date = SimpleDateFormat("dd/MM/yyyy-HH:mm", Locale.getDefault()).format(Date())
         val counter = String.format(Locale.US, "%02d", LifePrefs.nextCounter(context))
         return buildString {
-            append("$B,")
+            append("\$B,")
             append(config.transmitterId)
             append(',')
             append(counter)
@@ -299,7 +299,7 @@ object LifePacketBuilder {
             append(config.monitoringIp)
             append(',')
             append(config.monitoringPort)
-            append(",00,10,4G,$E")
+            append(",00,10,4G,\$E")
         }
     }
 }
