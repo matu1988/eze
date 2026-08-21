@@ -1,4 +1,4 @@
-name: Build NanoSmart Boton Vida
+name: Build NanoSmart Boton Vida GPS Fix
 
 on:
   push:
@@ -7,9 +7,8 @@ on:
 permissions:
   contents: write
 
-# trigger-build: gps-fix2-2026-08-21
 jobs:
-  build-and-test:
+  build-app:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -17,190 +16,6 @@ jobs:
         with:
           ref: boton-vida-640
           fetch-depth: 0
-
-      - name: Apply Boton Vida GPS fix
-        shell: python
-        run: |
-          from pathlib import Path
-
-          integration = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt')
-          text = integration.read_text(encoding='utf-8')
-          start = text.index('object LifeButtonLocationProvider {')
-          end = text.index('\ninternal fun Long.toLifeIsoTimestamp()', start)
-          new_provider = r'''object LifeButtonLocationProvider {
-              private const val TIMEOUT_MS = 10_000L
-              private const val MAX_CURRENT_AGE_MS = 60_000L
-              private const val MAX_FALLBACK_AGE_MS = 60_000L
-
-              @SuppressLint("MissingPermission")
-              fun requestFresh(context: Context, callback: (EmergencyLocation?) -> Unit) {
-                  val appContext = context.applicationContext
-                  val fine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) ==
-                      PackageManager.PERMISSION_GRANTED
-                  val coarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) ==
-                      PackageManager.PERMISSION_GRANTED
-                  if (!fine && !coarse) {
-                      callback(null)
-                      return
-                  }
-
-                  val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-                  val enabledProviders = buildList {
-                      if (runCatching { manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
-                          add(LocationManager.NETWORK_PROVIDER)
-                      }
-                      if (runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) {
-                          add(LocationManager.GPS_PROVIDER)
-                      }
-                  }.distinct()
-
-                  fun accepted(location: Location?, maxAgeMs: Long): EmergencyLocation? {
-                      if (location == null) return null
-                      val now = System.currentTimeMillis()
-                      val capturedAt = location.time.takeIf { it > 0L } ?: now
-                      val age = (now - capturedAt.coerceAtMost(now)).coerceAtLeast(0L)
-                      if (age > maxAgeMs) return null
-                      if (!EmergencyLocationPolicy.validCoordinates(location.latitude, location.longitude)) return null
-                      return EmergencyLocation(
-                          latitude = location.latitude,
-                          longitude = location.longitude,
-                          accuracyMeters = location.accuracy.takeIf { location.hasAccuracy() },
-                          capturedAtMillis = capturedAt
-                      )
-                  }
-
-                  fun recentLastKnown(): EmergencyLocation? {
-                      val candidates = listOf(
-                          LocationManager.NETWORK_PROVIDER,
-                          LocationManager.GPS_PROVIDER,
-                          LocationManager.PASSIVE_PROVIDER
-                      ).mapNotNull { provider ->
-                          runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
-                      }.mapNotNull { accepted(it, MAX_FALLBACK_AGE_MS) }
-                      return candidates.minWithOrNull(
-                          compareBy<EmergencyLocation> { it.accuracyMeters ?: Float.MAX_VALUE }
-                              .thenByDescending { it.capturedAtMillis }
-                      )
-                  }
-
-                  if (enabledProviders.isEmpty()) {
-                      callback(recentLastKnown())
-                      return
-                  }
-
-                  val delivered = AtomicBoolean(false)
-                  val handler = Handler(Looper.getMainLooper())
-                  val cancellations = mutableListOf<CancellationSignal>()
-
-                  fun finish(location: EmergencyLocation?) {
-                      if (!delivered.compareAndSet(false, true)) return
-                      cancellations.forEach { runCatching { it.cancel() } }
-                      callback(location ?: recentLastKnown())
-                  }
-
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                      enabledProviders.forEach { provider ->
-                          val cancellation = CancellationSignal()
-                          cancellations += cancellation
-                          runCatching {
-                              manager.getCurrentLocation(
-                                  provider,
-                                  cancellation,
-                                  ContextCompat.getMainExecutor(appContext)
-                              ) { location ->
-                                  accepted(location, MAX_CURRENT_AGE_MS)?.let(::finish)
-                              }
-                          }
-                      }
-                      handler.postDelayed({ finish(null) }, TIMEOUT_MS)
-                      return
-                  }
-
-                  @Suppress("DEPRECATION")
-                  val listener = object : android.location.LocationListener {
-                      override fun onLocationChanged(location: Location) {
-                          accepted(location, MAX_CURRENT_AGE_MS)?.let {
-                              runCatching { manager.removeUpdates(this) }
-                              finish(it)
-                          }
-                      }
-                      override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) = Unit
-                      override fun onProviderEnabled(provider: String) = Unit
-                      override fun onProviderDisabled(provider: String) = Unit
-                  }
-                  enabledProviders.forEach { provider ->
-                      runCatching {
-                          @Suppress("DEPRECATION")
-                          manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
-                      }
-                  }
-                  handler.postDelayed({
-                      runCatching { manager.removeUpdates(listener) }
-                      finish(null)
-                  }, TIMEOUT_MS)
-              }
-          }
-          '''
-          text = text[:start] + new_provider + text[end:]
-          integration.write_text(text, encoding='utf-8')
-
-          service = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt')
-          svc = service.read_text(encoding='utf-8')
-          cb_start = svc.index('        LifeButtonLocationProvider.requestFresh(this) { location ->')
-          cb_end_marker = '\n        }\n    }\n\n    private fun flushQueue()'
-          cb_end = svc.index(cb_end_marker, cb_start) + len('\n        }')
-          new_callback = '''        LifeButtonLocationProvider.requestFresh(this) { location ->
-            fun persistWhenIdle() {
-                if (flushing.get()) {
-                    mainHandler.postDelayed({ persistWhenIdle() }, 100L)
-                    return
-                }
-                LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
-                    current.copy(locationReady = true, location = location)
-                }
-                LifeButtonPrefs.setServerState(
-                    this,
-                    config.imei,
-                    if (location != null) "Ubicación obtenida · enviando pedido…" else "Ubicación no disponible · enviando pedido…"
-                )
-                flushQueue()
-            }
-            persistWhenIdle()
-        }'''
-          svc = svc[:cb_start] + new_callback + svc[cb_end:]
-          svc = svc.replace(
-              'LifeButtonPrefs.setServerState(this, event.imei, "Pedido enviado")',
-              'LifeButtonPrefs.setServerState(this, event.imei, if (event.location != null) "Pedido enviado · ubicación incluida" else "Pedido enviado · sin ubicación")',
-              1
-          )
-          svc = svc.replace('private const val LOCATION_FALLBACK_MS = 10_000L', 'private const val LOCATION_FALLBACK_MS = 12_000L')
-          service.write_text(svc, encoding='utf-8')
-
-      - name: Commit and push corrected source
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt \
-                  android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt
-          if ! git diff --cached --quiet; then
-            git commit -m "Fix Botón Vida GPS network and queue handling"
-            git push origin HEAD:boton-vida-640
-          fi
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Verify server
-        working-directory: server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor
-        shell: bash
-        run: |
-          npm ci --omit=dev
-          node -e "require('qrcode'); require('./src/pairing')"
-          node --check server.js
-          npm test
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -213,34 +28,36 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Build integrated Android app
+      - name: Compile integrated app
         working-directory: android-src/source_package_v32
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Package GPS fix
+      - name: Package APK and source
         shell: bash
         run: |
           mkdir -p deliverables
-          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk
-          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
-          printf '%s\n' "Build OK GPSFIX2 $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/GPSFIX_BUILD_OK.txt
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          printf '%s\n' "Build OK Boton Vida GPS FIX FINAL $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/GPSFIX_FINAL_BUILD_OK.txt
 
-      - name: Commit GPS fix deliverables
+      - name: Commit deliverables
         shell: bash
         run: |
-          git add -f deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk \
-                     deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip \
-                     deliverables/GPSFIX_BUILD_OK.txt
-          git commit -m "Build Botón Vida GPSFIX2 APK" || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk \
+                     deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip \
+                     deliverables/GPSFIX_FINAL_BUILD_OK.txt
+          git commit -m "Build final Botón Vida GPS fix APK" || true
           git push origin HEAD:boton-vida-640
 
-      - name: Upload GPS fix
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nanosmart-boton-vida-gpsfix2
+          name: nanosmart-boton-vida-gpsfix-final
           path: |
-            deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX2-debug.apk
-            deliverables/NanoSmart_Android_BotonVida_GPSFIX2_Source.zip
-            deliverables/GPSFIX_BUILD_OK.txt
+            deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk
+            deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip
+            deliverables/GPSFIX_FINAL_BUILD_OK.txt
           if-no-files-found: error
           retention-days: 14
