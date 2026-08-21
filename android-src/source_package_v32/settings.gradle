@@ -14,4 +14,3 @@ dependencyResolutionManagement {
 }
 rootProject.name = "NanoSmartEventos"
 include(":app")
-include(":vida")
