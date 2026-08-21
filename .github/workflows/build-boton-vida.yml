@@ -7,7 +7,7 @@ on:
 permissions:
   contents: write
 
-# trigger-build: 2026-08-21
+# trigger-build: integrated-main-app-2026-08-21
 jobs:
   build-and-test:
     if: github.actor != 'github-actions[bot]'
@@ -50,8 +50,8 @@ jobs:
           if route_marker not in s:
               anchor = "      if (req.method === 'POST' && pathname === '/api/app/emergency') {"
               route = r'''      if (req.method === 'POST' && pathname === '/api/app/life/status') {
-            if (String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON') {
-              throw new RegistryError('Esta ruta requiere una credencial Botón Vida', 403, 'LIFE_CREDENTIAL_REQUIRED');
+            if (!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())) {
+              throw new RegistryError('Esta ruta requiere una credencial válida de NanoSmart', 403, 'LIFE_CREDENTIAL_REQUIRED');
             }
             const body = await readJsonBody(req);
             const statusCode = String(body.status || '').trim().toUpperCase();
@@ -81,6 +81,15 @@ jobs:
               if anchor not in s:
                   raise SystemExit('No se encontró ancla /api/app/emergency')
               s = s.replace(anchor, route + anchor, 1)
+
+          s = s.replace(
+              "String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON'",
+              "!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())"
+          )
+          s = s.replace(
+              "Esta ruta requiere una credencial Botón Vida",
+              "Esta ruta requiere una credencial válida de NanoSmart"
+          )
           server.write_text(s, encoding='utf-8')
 
           core = Path('android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt')
@@ -97,7 +106,7 @@ jobs:
           git add server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js \
                   android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt
           if ! git diff --cached --quiet; then
-            git commit -m "Finalize Botón Vida server status and packet literals"
+            git commit -m "Finalize integrated Botón Vida server support"
           fi
 
       - name: Setup Node
@@ -124,32 +133,32 @@ jobs:
 
       - name: Build Android apps
         working-directory: android-src/source_package_v32
-        run: gradle :vida:assembleDebug :app:assembleDebug --stacktrace
+        run: gradle :app:assembleDebug :vida:assembleDebug --stacktrace
 
       - name: Package projects
         shell: bash
         run: |
           rm -rf deliverables
           mkdir -p deliverables
-          cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_1.0.0-test.apk
-          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida640-debug.apk
-          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_Integrado-debug.apk
+          cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_Standalone_1.0.0-test.apk
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_Integrado_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
           (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/node_modules/*' '*/data/*' '*/secrets/*')
-          printf '%s\n' "Build OK $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
+          printf '%s\n' "Build OK integrated main app $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
 
       - name: Commit deliverables
         shell: bash
         run: |
           git add -f deliverables
           if ! git diff --cached --quiet; then
-            git commit -m "Build Botón Vida test deliverables"
+            git commit -m "Build integrated Botón Vida test deliverables"
           fi
           git push origin HEAD:boton-vida-640
 
       - name: Upload deliverables
         uses: actions/upload-artifact@v4
         with:
-          name: nanosmart-boton-vida-test
+          name: nanosmart-boton-vida-integrated-test
           path: deliverables/*
           if-no-files-found: error
           retention-days: 14
