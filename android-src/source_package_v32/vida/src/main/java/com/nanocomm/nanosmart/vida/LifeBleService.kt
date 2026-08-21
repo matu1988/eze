@@ -105,7 +105,7 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
         }
         updateNotification("Conectando a ${config.deviceName.ifBlank { "Botón Vida" }}…")
         gatt = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            device.connectGatt(this, false, callback, BluetoothGatt.TRANSPORT_LE)
+            device.connectGatt(this, false, callback, android.bluetooth.BluetoothDevice.TRANSPORT_LE)
         } else {
             device.connectGatt(this, false, callback)
         }
@@ -199,7 +199,7 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun handleBattery(value: ByteArray?) {
-        if (value.isNullOrEmpty()) return
+        if (value == null || value.isEmpty()) return
         val battery = value[0].toInt() and 0xFF
         if (battery !in 0..100) return
         LifePrefs.setBattery(this, battery)
