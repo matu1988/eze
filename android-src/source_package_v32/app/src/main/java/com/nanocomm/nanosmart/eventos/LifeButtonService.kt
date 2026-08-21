@@ -283,13 +283,29 @@ class LifeButtonService : Service(), TextToSpeech.OnInitListener {
         LifeButtonPrefs.enqueue(this, event)
         LifeButtonPrefs.setServerState(this, config.imei, "Enviando pedido de ayuda…")
 
-        // El UDP de monitoreo sale inmediatamente. El registro HTTP espera hasta 8 s por una posición nueva.
+        // El UDP de monitoreo sale inmediatamente. El registro HTTP espera hasta 10 s por una posición nueva.
         flushQueue()
         LifeButtonLocationProvider.requestFresh(this) { location ->
-            LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
-                current.copy(locationReady = true, location = location)
+            fun persistWhenIdle() {
+                if (flushing.get()) {
+                    mainHandler.postDelayed({ persistWhenIdle() }, 100L)
+                    return
+                }
+                LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
+                    current.copy(locationReady = true, location = location)
+                }
+                LifeButtonPrefs.setServerState(
+                    this,
+                    config.imei,
+                    if (location != null) {
+                        "Ubicación obtenida · enviando pedido…"
+                    } else {
+                        "Ubicación no disponible · enviando pedido…"
+                    }
+                )
+                flushQueue()
             }
-            flushQueue()
+            persistWhenIdle()
         }
     }
 
@@ -318,7 +334,15 @@ class LifeButtonService : Service(), TextToSpeech.OnInitListener {
 
                     if (event.complete) {
                         failureAnnounced.remove(event.requestId)
-                        LifeButtonPrefs.setServerState(this, event.imei, "Pedido enviado")
+                        LifeButtonPrefs.setServerState(
+                            this,
+                            event.imei,
+                            if (event.location != null) {
+                                "Pedido enviado · ubicación incluida"
+                            } else {
+                                "Pedido enviado · sin ubicación"
+                            }
+                        )
                         announceSuccess()
                     } else {
                         remaining += event
@@ -493,7 +517,7 @@ class LifeButtonService : Service(), TextToSpeech.OnInitListener {
         private const val RECONNECT_MS = 10_000L
         private const val RETRY_MS = 30_000L
         private const val PRESS_DEBOUNCE_MS = 1_500L
-        private const val LOCATION_FALLBACK_MS = 10_000L
+        private const val LOCATION_FALLBACK_MS = 12_000L
         private const val DISCONNECT_ALERT_MS = 120_000L
         private const val LOW_BATTERY_PERCENT = 20
 
