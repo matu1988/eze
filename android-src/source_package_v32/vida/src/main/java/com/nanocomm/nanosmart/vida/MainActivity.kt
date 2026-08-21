@@ -37,7 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var person: EditText
     private lateinit var panel: EditText
     private lateinit var imei: EditText
-    private lateinit var token: EditText
+    private lateinit var accessKey: EditText
     private lateinit var abonado: EditText
     private lateinit var transmitter: EditText
     private lateinit var key: EditText
@@ -49,9 +49,7 @@ class MainActivity : AppCompatActivity() {
     private val foundDevices = linkedMapOf<String, BluetoothDevice>()
     private var pendingScan = false
 
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) {
+    private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (pendingScan) {
             pendingScan = false
             if (hasBlePermissions()) startBleScan()
@@ -84,7 +82,7 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
         })
         root.addView(TextView(this).apply {
-            text = "Evento Contact ID 640 · escucha BLE permanente"
+            text = "Climax BL3 · Contact ID 640 · escucha BLE permanente"
             textSize = 14f
             setPadding(0, dp(4), 0, dp(18))
         })
@@ -98,8 +96,8 @@ class MainActivity : AppCompatActivity() {
         person = field(root, "Nombre de la persona adulta")
         panel = field(root, "Nombre del domicilio o panel")
         imei = field(root, "IMEI del panel (15 dígitos)", InputType.TYPE_CLASS_NUMBER)
-        token = field(root, "Token NanoSmart", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
-        abonado = field(root, "Abonado")
+        accessKey = field(root, "Clave de acceso NanoSmart (NS-....)")
+        abonado = field(root, "Abonado (4 caracteres)")
         transmitter = field(root, "ID / transmisor")
         key = field(root, "Clave del equipo")
         ip = field(root, "IP de monitoreo")
@@ -117,7 +115,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(4), 0, dp(10))
         }
         root.addView(buttonLabel)
-        btnPair = Button(this).apply { text = "Buscar y vincular botón" }
+        btnPair = Button(this).apply { text = "Buscar y vincular Climax BL3" }
         root.addView(btnPair)
 
         val save = Button(this).apply { text = "Guardar y activar" }
@@ -133,11 +131,9 @@ class MainActivity : AppCompatActivity() {
         root.addView(test)
 
         btnPair.setOnClickListener { requestScan() }
-        save.setOnClickListener { saveConfig() }
+        save.setOnClickListener { saveAndActivate() }
         test.setOnClickListener { confirmTestEvent() }
-        enabledSwitch.setOnCheckedChangeListener { _, checked ->
-            btnPair.isEnabled = checked
-        }
+        enabledSwitch.setOnCheckedChangeListener { _, checked -> btnPair.isEnabled = checked }
 
         return ScrollView(this).apply { addView(root) }
     }
@@ -162,7 +158,7 @@ class MainActivity : AppCompatActivity() {
         person.setText(config.personName)
         panel.setText(config.panelName)
         imei.setText(config.imei)
-        token.setText(config.token)
+        accessKey.setText(config.accessKey)
         abonado.setText(config.abonado)
         transmitter.setText(config.transmitterId)
         key.setText(config.key)
@@ -173,51 +169,71 @@ class MainActivity : AppCompatActivity() {
         if (config.enabled && config.validForService()) LifeBleService.start(this)
     }
 
-    private fun currentConfig(): LifeConfig = LifeConfig(
-        enabled = enabledSwitch.isChecked,
-        personName = person.text.toString().trim(),
-        panelName = panel.text.toString().trim(),
-        imei = imei.text.toString().trim(),
-        token = token.text.toString().trim(),
-        abonado = abonado.text.toString().trim(),
-        transmitterId = transmitter.text.toString().trim(),
-        key = key.text.toString().trim(),
-        monitoringIp = ip.text.toString().trim(),
-        monitoringPort = port.text.toString().trim().toIntOrNull() ?: 0,
-        deviceAddress = LifePrefs.load(this).deviceAddress,
-        deviceName = LifePrefs.load(this).deviceName
-    )
+    private fun currentConfig(): LifeConfig {
+        val stored = LifePrefs.load(this)
+        return LifeConfig(
+            enabled = enabledSwitch.isChecked,
+            personName = person.text.toString().trim(),
+            panelName = panel.text.toString().trim(),
+            imei = imei.text.toString().trim(),
+            accessKey = accessKey.text.toString().trim().uppercase(),
+            token = stored.token,
+            abonado = abonado.text.toString().trim(),
+            transmitterId = transmitter.text.toString().trim(),
+            key = key.text.toString().trim(),
+            monitoringIp = ip.text.toString().trim(),
+            monitoringPort = port.text.toString().trim().toIntOrNull() ?: 0,
+            deviceAddress = stored.deviceAddress,
+            deviceName = stored.deviceName
+        )
+    }
 
-    private fun saveConfig() {
-        val config = currentConfig()
-        if (config.enabled) {
-            val problem = when {
-                config.personName.isBlank() -> "Ingresá el nombre de la persona"
-                !config.imei.matches(Regex("\\d{15}")) -> "El IMEI debe tener 15 dígitos"
-                config.token.isBlank() -> "Ingresá el token NanoSmart"
-                config.abonado.isBlank() -> "Ingresá el abonado"
-                config.transmitterId.isBlank() -> "Ingresá el ID / transmisor"
-                config.key.isBlank() -> "Ingresá la clave del equipo"
-                config.monitoringIp.isBlank() -> "Ingresá la IP de monitoreo"
-                config.monitoringPort !in 1..65535 -> "Puerto de monitoreo inválido"
-                config.deviceAddress.isBlank() -> "Vinculá primero el botón Bluetooth"
-                else -> null
-            }
-            if (problem != null) {
-                Toast.makeText(this, problem, Toast.LENGTH_LONG).show()
-                return
-            }
-        }
-        LifePrefs.save(this, config)
-        if (config.enabled) {
-            LifeBleService.start(this)
-            Toast.makeText(this, "Botón Vida activado", Toast.LENGTH_SHORT).show()
-        } else {
+    private fun validateForActivation(config: LifeConfig): String? = when {
+        config.personName.isBlank() -> "Ingresá el nombre de la persona"
+        !config.imei.matches(Regex("\\d{15}")) -> "El IMEI debe tener 15 dígitos"
+        config.accessKey.isBlank() -> "Ingresá la clave de acceso NanoSmart"
+        config.abonado.length != 4 -> "El abonado debe tener 4 caracteres"
+        config.transmitterId.isBlank() -> "Ingresá el ID / transmisor"
+        config.key.isBlank() -> "Ingresá la clave del equipo"
+        config.monitoringIp.isBlank() -> "Ingresá la IP de monitoreo"
+        config.monitoringPort !in 1..65535 -> "Puerto de monitoreo inválido"
+        config.deviceAddress.isBlank() -> "Vinculá primero el Climax BL3"
+        else -> null
+    }
+
+    private fun saveAndActivate() {
+        var config = currentConfig()
+        if (!config.enabled) {
+            LifePrefs.save(this, config)
             stopService(Intent(this, LifeBleService::class.java))
             LifePrefs.setConnection(this, false)
             Toast.makeText(this, "Botón Vida desactivado", Toast.LENGTH_SHORT).show()
+            return
         }
-        updateButtonLabel(config)
+        validateForActivation(config)?.let {
+            Toast.makeText(this, it, Toast.LENGTH_LONG).show()
+            return
+        }
+        LifePrefs.save(this, config)
+        LifePrefs.setServerState(this, "Registrando credencial Botón Vida…")
+        Thread {
+            runCatching {
+                val token = LifeRegistration.register(config)
+                LifePrefs.setToken(this, token)
+                config = config.copy(token = token)
+                LifePrefs.save(this, config)
+                LifePrefs.setServerState(this, "Conectado al servidor")
+                runOnUiThread {
+                    LifeBleService.start(this)
+                    Toast.makeText(this, "Botón Vida activado", Toast.LENGTH_SHORT).show()
+                }
+            }.onFailure { error ->
+                LifePrefs.setServerState(this, "Error de registro")
+                runOnUiThread {
+                    Toast.makeText(this, "No se pudo registrar Botón Vida: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun requestBasePermissions() {
@@ -253,25 +269,27 @@ class MainActivity : AppCompatActivity() {
 
     @SuppressLint("MissingPermission")
     private fun startBleScan() {
-        val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val adapter = manager.adapter
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         if (adapter == null || !adapter.isEnabled) {
             Toast.makeText(this, "Activá Bluetooth para buscar el botón", Toast.LENGTH_LONG).show()
             return
         }
+        foundDevices.clear()
+        adapter.bondedDevices
+            .filter { runCatching { it.name.orEmpty().startsWith("BL3", ignoreCase = true) }.getOrDefault(false) }
+            .forEach { foundDevices[it.address] = it }
         val scanner = adapter.bluetoothLeScanner
         if (scanner == null) {
-            Toast.makeText(this, "No se pudo iniciar el escaneo BLE", Toast.LENGTH_LONG).show()
+            showScanResults()
             return
         }
-        foundDevices.clear()
         btnPair.isEnabled = false
-        btnPair.text = "Buscando…"
+        btnPair.text = "Buscando Climax BL3…"
         scanner.startScan(scanCallback)
         handler.postDelayed({
             runCatching { scanner.stopScan(scanCallback) }
             btnPair.isEnabled = true
-            btnPair.text = if (LifePrefs.load(this).deviceAddress.isBlank()) "Buscar y vincular botón" else "Cambiar botón"
+            btnPair.text = if (LifePrefs.load(this).deviceAddress.isBlank()) "Buscar y vincular Climax BL3" else "Cambiar botón"
             showScanResults()
         }, SCAN_MS)
     }
@@ -279,13 +297,14 @@ class MainActivity : AppCompatActivity() {
     private val scanCallback = object : ScanCallback() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            foundDevices[result.device.address] = result.device
+            val name = runCatching { result.device.name.orEmpty() }.getOrDefault("")
+            if (name.startsWith("BL3", ignoreCase = true)) foundDevices[result.device.address] = result.device
         }
 
         override fun onScanFailed(errorCode: Int) {
             runOnUiThread {
                 btnPair.isEnabled = true
-                btnPair.text = "Buscar y vincular botón"
+                btnPair.text = "Buscar y vincular Climax BL3"
                 Toast.makeText(this@MainActivity, "Falló el escaneo BLE ($errorCode)", Toast.LENGTH_LONG).show()
             }
         }
@@ -294,12 +313,12 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun showScanResults() {
         if (foundDevices.isEmpty()) {
-            Toast.makeText(this, "No se encontraron dispositivos BLE", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "No se encontró ningún Climax BL3", Toast.LENGTH_LONG).show()
             return
         }
         val devices = foundDevices.values.toList()
         val labels = devices.map { device ->
-            val name = runCatching { device.name }.getOrNull().orEmpty().ifBlank { "Dispositivo BLE" }
+            val name = runCatching { device.name }.getOrNull().orEmpty().ifBlank { "Climax BL3" }
             "$name\n${device.address}"
         }.toTypedArray()
         AlertDialog.Builder(this)
@@ -312,19 +331,18 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("MissingPermission")
     private fun pairDevice(device: BluetoothDevice) {
         val current = currentConfig()
-        val name = runCatching { device.name }.getOrNull().orEmpty().ifBlank { "Botón Vida" }
-        val updated = current.copy(deviceAddress = device.address, deviceName = name)
+        val name = runCatching { device.name }.getOrNull().orEmpty().ifBlank { "Climax BL3" }
+        val updated = current.copy(deviceAddress = device.address, deviceName = name, token = "")
         LifePrefs.save(this, updated)
         updateButtonLabel(updated)
         btnPair.text = "Cambiar botón"
-        if (updated.enabled && updated.validForService()) LifeBleService.start(this)
-        Toast.makeText(this, "Botón vinculado: $name", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "BL3 vinculado: $name. Guardá para activar.", Toast.LENGTH_LONG).show()
     }
 
     private fun confirmTestEvent() {
-        val config = currentConfig()
+        val config = currentConfig().copy(token = LifePrefs.load(this).token)
         if (!config.validForService()) {
-            Toast.makeText(this, "Guardá una configuración completa antes de probar", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Guardá y activá una configuración completa antes de probar", Toast.LENGTH_LONG).show()
             return
         }
         AlertDialog.Builder(this)
@@ -340,12 +358,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonLabel(config: LifeConfig) {
-        buttonLabel.text = if (config.deviceAddress.isBlank()) {
-            "Sin botón vinculado"
-        } else {
-            "${config.deviceName.ifBlank { "Botón Vida" }} · ${config.deviceAddress}"
-        }
-        btnPair.text = if (config.deviceAddress.isBlank()) "Buscar y vincular botón" else "Cambiar botón"
+        buttonLabel.text = if (config.deviceAddress.isBlank()) "Sin botón vinculado"
+        else "${config.deviceName.ifBlank { "Climax BL3" }} · ${config.deviceAddress}"
+        btnPair.text = if (config.deviceAddress.isBlank()) "Buscar y vincular Climax BL3" else "Cambiar botón"
     }
 
     private val statusPoller = object : Runnable {
@@ -362,7 +377,8 @@ class MainActivity : AppCompatActivity() {
             SimpleDateFormat("dd/MM/yyyy HH:mm:ss", Locale.getDefault()).format(Date(it))
         } ?: "Sin pulsaciones"
         val pending = LifePrefs.queue(this).size
-        status.text = "Estado del botón: $connected\nBatería: $battery\nÚltima pulsación: $lastPress\nServidor: ${LifePrefs.serverState(this)}\nPendientes de envío: $pending"
+        val credential = if (LifePrefs.load(this).token.isNotBlank()) "Credencial Botón Vida OK" else "Sin credencial Botón Vida"
+        status.text = "Estado del botón: $connected\nBatería: $battery\nÚltima pulsación: $lastPress\nServidor: ${LifePrefs.serverState(this)}\n$credential\nPendientes de envío: $pending"
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()

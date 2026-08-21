@@ -1,0 +1,135 @@
+name: Build NanoSmart Boton Vida
+
+on:
+  push:
+    branches: [boton-vida-640]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: boton-vida-640
+          fetch-depth: 0
+
+      - name: Finalize Boton Vida server status route
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js')
+          s = p.read_text(encoding='utf-8')
+          marker = "async function forwardLifeStatusToPhones(status)"
+          if marker not in s:
+              anchor = "function sendUdpPayload(payload, remote) {"
+              insert = r'''async function forwardLifeStatusToPhones(status) {
+            const targets = registry.listPushTargets(status.imei);
+            const result = await pushService.sendLifeStatus(status, targets);
+            runtimeState.pushMessagesSent += result.sent;
+            runtimeState.pushErrors += result.errors;
+            runtimeState.invalidPushTokensRemoved += registry.clearPushTokens(result.invalidTargets);
+            if (result.sent > 0) {
+              console.log(`[FCM] Estado Botón Vida ${status.status} enviado a ${result.sent}/${result.requested} celular(es)`);
+            } else if (result.requested > 0 && result.errors > 0) {
+              console.warn(`[FCM] No se pudo notificar estado Botón Vida: ${(result.errorMessages || []).join(' | ')}`);
+            }
+          }
+
+          '''
+              if anchor not in s:
+                  raise SystemExit('No se encontró ancla sendUdpPayload')
+              s = s.replace(anchor, insert + anchor, 1)
+
+          route_marker = "pathname === '/api/app/life/status'"
+          if route_marker not in s:
+              anchor = "      if (req.method === 'POST' && pathname === '/api/app/emergency') {"
+              route = r'''      if (req.method === 'POST' && pathname === '/api/app/life/status') {
+            if (String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON') {
+              throw new RegistryError('Esta ruta requiere una credencial Botón Vida', 403, 'LIFE_CREDENTIAL_REQUIRED');
+            }
+            const body = await readJsonBody(req);
+            const statusCode = String(body.status || '').trim().toUpperCase();
+            if (!['DISCONNECTED', 'BATTERY_LOW', 'BATTERY_RESTORED'].includes(statusCode)) {
+              throw new RegistryError('Estado Botón Vida inválido', 400, 'INVALID_LIFE_STATUS');
+            }
+            const battery = optionalNumber(body.buttonBattery);
+            const statusEvent = {
+              imei: installation.imei,
+              status: statusCode,
+              actorName: String(body.name || installation.name || '').trim().slice(0, 80),
+              panelName: String(body.panelName || '').trim().slice(0, 120),
+              buttonId: String(body.buttonId || '').trim().slice(0, 160),
+              buttonName: String(body.buttonName || '').trim().slice(0, 120),
+              buttonBattery: battery !== null && battery >= 0 && battery <= 100 ? battery : null,
+              receivedAt: new Date().toISOString()
+            };
+            void forwardLifeStatusToPhones(statusEvent).catch((error) => {
+              runtimeState.pushErrors += 1;
+              console.error(`[FCM] Error notificando estado Botón Vida: ${error.stack || error.message}`);
+            });
+            json(res, 202, { ok: true, status: statusEvent });
+            return;
+          }
+
+          '''
+              if anchor not in s:
+                  raise SystemExit('No se encontró ancla /api/app/emergency')
+              s = s.replace(anchor, route + anchor, 1)
+          p.write_text(s, encoding='utf-8')
+
+      - name: Commit finalized server route
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js
+          if ! git diff --cached --quiet; then
+            git commit -m "Finalize Botón Vida status notifications"
+            git push origin HEAD:boton-vida-640
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Test server
+        working-directory: server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor
+        run: |
+          node --check server.js
+          npm test
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build Android apps
+        working-directory: android-src/source_package_v32
+        run: gradle :vida:assembleDebug :app:assembleDebug --stacktrace
+
+      - name: Package projects
+        shell: bash
+        run: |
+          mkdir -p deliverables
+          cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_1.0.0-test.apk
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida640-debug.apk
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/node_modules/*' '*/data/*' '*/secrets/*')
+
+      - name: Upload deliverables
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanosmart-boton-vida-test
+          path: deliverables/*
+          if-no-files-found: error
+          retention-days: 14

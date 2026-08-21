@@ -24,9 +24,7 @@ function stringValue(value) {
 
 function mapsUrl(event) {
   if (event.latitude === null || event.latitude === undefined || event.latitude === '' ||
-      event.longitude === null || event.longitude === undefined || event.longitude === '') {
-    return '';
-  }
+      event.longitude === null || event.longitude === undefined || event.longitude === '') return '';
   const latitude = Number(event.latitude);
   const longitude = Number(event.longitude);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return '';
@@ -52,18 +50,28 @@ function compactBody(event) {
   return parts.join(' · ');
 }
 
+function lifeStatusMessage(item) {
+  const name = item.actorName || item.panelName || 'Botón Vida';
+  const battery = Number.isFinite(Number(item.buttonBattery)) ? ` (${Number(item.buttonBattery)}%)` : '';
+  switch (String(item.status || '').toUpperCase()) {
+    case 'DISCONNECTED':
+      return { title: 'Botón Vida desconectado', body: `${name}: el botón está fuera de alcance o apagado` };
+    case 'BATTERY_LOW':
+      return { title: 'Batería baja · Botón Vida', body: `${name}: batería baja${battery}` };
+    case 'BATTERY_RESTORED':
+      return { title: 'Batería restablecida · Botón Vida', body: `${name}: batería normal${battery}` };
+    default:
+      return { title: 'Estado Botón Vida', body: `${name}: ${String(item.status || 'actualización')}` };
+  }
+}
+
 class FirebasePushService {
   constructor(options = {}) {
     this.enabled = options.enabled === true;
     this.projectId = String(options.projectId || '').trim();
-    this.serviceAccountFile = options.serviceAccountFile
-      ? path.resolve(options.serviceAccountFile)
-      : null;
+    this.serviceAccountFile = options.serviceAccountFile ? path.resolve(options.serviceAccountFile) : null;
     this.timeoutMs = Number.parseInt(options.timeoutMs || 10000, 10);
-    this.maxConcurrentSends = Math.max(
-      1,
-      Math.min(100, Number.parseInt(options.maxConcurrentSends || 20, 10) || 20)
-    );
+    this.maxConcurrentSends = Math.max(1, Math.min(100, Number.parseInt(options.maxConcurrentSends || 20, 10) || 20));
     this.fetchImpl = options.fetchImpl || globalThis.fetch;
     this.now = options.now || (() => Date.now());
     this.credentials = null;
@@ -74,25 +82,18 @@ class FirebasePushService {
     this.activeSends = 0;
     this.queuedSends = [];
     this.maxObservedConcurrentSends = 0;
-
     this.#loadCredentials();
   }
 
   #loadCredentials() {
     if (!this.enabled) return;
     if (!this.serviceAccountFile || !fs.existsSync(this.serviceAccountFile)) {
-      const displayName = this.serviceAccountFile
-        ? path.basename(this.serviceAccountFile)
-        : 'el archivo de cuenta de servicio';
-      this.configurationError = `No se encontró ${displayName}`;
+      this.configurationError = `No se encontró ${this.serviceAccountFile ? path.basename(this.serviceAccountFile) : 'el archivo de cuenta de servicio'}`;
       return;
     }
-
     try {
       const credentials = JSON.parse(fs.readFileSync(this.serviceAccountFile, 'utf8'));
-      if (!credentials.client_email || !credentials.private_key) {
-        throw new Error('faltan client_email o private_key');
-      }
+      if (!credentials.client_email || !credentials.private_key) throw new Error('faltan client_email o private_key');
       this.credentials = credentials;
       this.projectId ||= String(credentials.project_id || '').trim();
       if (!this.projectId) throw new Error('falta project_id');
@@ -116,218 +117,146 @@ class FirebasePushService {
     };
   }
 
-  async sendAlert(event, targets) {
-    return this.#sendToTargets(event, targets, 'ALERT');
-  }
-
-  async sendDeviceCommand(command, targets) {
-    return this.#sendToTargets(command, targets, 'DEVICE_COMMAND');
-  }
-
-  async sendPanelState(panelState, targets) {
-    return this.#sendToTargets(panelState, targets, 'PANEL_STATE');
-  }
+  async sendAlert(event, targets) { return this.#sendToTargets(event, targets, 'ALERT'); }
+  async sendDeviceCommand(command, targets) { return this.#sendToTargets(command, targets, 'DEVICE_COMMAND'); }
+  async sendPanelState(panelState, targets) { return this.#sendToTargets(panelState, targets, 'PANEL_STATE'); }
+  async sendLifeStatus(status, targets) { return this.#sendToTargets(status, targets, 'LIFE_STATUS'); }
 
   async #sendToTargets(item, targets, type) {
     const normalizedTargets = Array.isArray(targets)
-      ? targets
-        .filter((item) => item?.pushToken)
-        .map((item) => ({ ...item, platform: item.platform === 'IOS' ? 'IOS' : 'ANDROID' }))
+      ? targets.filter((target) => target?.pushToken)
+        .map((target) => ({ ...target, platform: target.platform === 'IOS' ? 'IOS' : 'ANDROID' }))
       : [];
     const status = this.getStatus();
     if (!status.ready || normalizedTargets.length === 0) {
-      return {
-        requested: normalizedTargets.length,
-        sent: 0,
-        errors: 0,
-        skipped: normalizedTargets.length,
-        invalidTargets: []
-      };
+      return { requested: normalizedTargets.length, sent: 0, errors: 0, skipped: normalizedTargets.length, invalidTargets: [] };
     }
-
     const results = await Promise.all(normalizedTargets.map(async (target) => {
       try {
-        await this.#withSendSlot(() =>
-          this.#sendToToken(item, target.pushToken, true, type, target.platform)
-        );
+        await this.#withSendSlot(() => this.#sendToToken(item, target.pushToken, true, type, target.platform));
         return { target, sent: true };
       } catch (error) {
         return { target, sent: false, error };
       }
     }));
-
     return {
       requested: results.length,
-      sent: results.filter((item) => item.sent).length,
-      errors: results.filter((item) => !item.sent).length,
+      sent: results.filter((result) => result.sent).length,
+      errors: results.filter((result) => !result.sent).length,
       skipped: 0,
-      invalidTargets: results
-        .filter((item) => !item.sent && item.error?.invalidToken)
-        .map((item) => item.target),
-      errorMessages: results
-        .filter((item) => !item.sent)
-        .map((item) => item.error?.message || 'Error FCM desconocido')
+      invalidTargets: results.filter((result) => !result.sent && result.error?.invalidToken).map((result) => result.target),
+      errorMessages: results.filter((result) => !result.sent).map((result) => result.error?.message || 'Error FCM desconocido')
     };
   }
 
   async #withSendSlot(callback) {
-    if (this.activeSends >= this.maxConcurrentSends) {
-      await new Promise((resolve) => this.queuedSends.push(resolve));
-    } else {
-      this.activeSends += 1;
-    }
-    this.maxObservedConcurrentSends = Math.max(
-      this.maxObservedConcurrentSends,
-      this.activeSends
-    );
+    if (this.activeSends >= this.maxConcurrentSends) await new Promise((resolve) => this.queuedSends.push(resolve));
+    else this.activeSends += 1;
+    this.maxObservedConcurrentSends = Math.max(this.maxObservedConcurrentSends, this.activeSends);
     try {
       return await callback();
     } finally {
       const next = this.queuedSends.shift();
-      if (next) {
-        next();
-      } else {
-        this.activeSends = Math.max(0, this.activeSends - 1);
-      }
+      if (next) next();
+      else this.activeSends = Math.max(0, this.activeSends - 1);
     }
   }
 
-  async #sendToToken(
-    item,
-    pushToken,
-    retryAuthentication = true,
-    type = 'ALERT',
-    platform = 'ANDROID'
-  ) {
+  async #sendToToken(item, pushToken, retryAuthentication = true, type = 'ALERT', platform = 'ANDROID') {
     const accessToken = await this.#getAccessToken();
     const endpoint = `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(this.projectId)}/messages:send`;
-    const isStateUpdate = type === 'DEVICE_COMMAND' || type === 'PANEL_STATE';
-    const panelStatus = String(item.panelStatus || '').toLowerCase();
-    const action = String(item.action || '').toLowerCase();
-    const fromApp = item.actionSource === 'APP';
-    const commandBody = item.alreadyInState
-      ? (fromApp && item.actorName
-          ? `${item.actorName} intentó ${action}, pero el panel ya estaba ${panelStatus}`
-          : `El panel ya estaba ${panelStatus} · Teclado del panel`)
-      : (fromApp && item.actorName
-          ? `Panel ${panelStatus} correctamente por ${item.actorName}`
-          : `Panel ${panelStatus} desde el teclado`);
-    const body = isStateUpdate ? commandBody : compactBody(item);
-    const title = isStateUpdate ? 'Estado NanoSmart' : 'Alerta NanoSmart';
-    const data = isStateUpdate ? {
-      type,
-      title,
-      body,
-      commandId: stringValue(item.id),
-      imei: stringValue(item.imei),
-      action: stringValue(item.action),
-      status: stringValue(item.status),
-      panelStatus: stringValue(item.panelStatus),
-      result: stringValue(item.result),
-      resultCode: stringValue(item.resultCode),
-      resultDescription: stringValue(item.resultDescription),
-      actionSource: stringValue(item.actionSource),
-      actorName: stringValue(item.actorName),
-      alreadyInState: stringValue(item.alreadyInState === true),
-      actionSentAt: stringValue(item.actionSentAt),
-      confirmedAt: stringValue(item.confirmedAt),
-      deliveredAt: stringValue(item.deliveredAt)
-    } : {
-      type: 'ALERT',
-      title,
-      body,
-      alertId: stringValue(item.id),
-      imei: stringValue(item.imei),
-      eventCode: stringValue(item.eventCode),
-      eventDescription: stringValue(item.eventDescription),
-      partition: stringValue(item.partition),
-      subject: stringValue(item.subject),
-      subjectNumber: stringValue(item.subjectNumber),
-      subjectKind: stringValue(item.subjectKind),
-      zoneName: stringValue(item.zoneName),
-      abonado: stringValue(item.abonado),
-      actionSource: stringValue(item.actionSource),
-      actorName: stringValue(item.actorName),
-      receivedAt: stringValue(item.receivedAt),
-      latitude: stringValue(item.latitude),
-      longitude: stringValue(item.longitude),
-      locationAccuracyMeters: stringValue(item.locationAccuracyMeters),
-      locationCapturedAt: stringValue(item.locationCapturedAt),
-      mapsUrl: mapsUrl(item)
-    };
-    const message = {
-      token: pushToken,
-      data
-    };
+    const isLifeStatus = type === 'LIFE_STATUS';
+    const isPanelState = type === 'DEVICE_COMMAND' || type === 'PANEL_STATE';
+    let title;
+    let body;
+    let data;
 
-    if (platform === 'IOS') {
-      message.notification = {
+    if (isLifeStatus) {
+      ({ title, body } = lifeStatusMessage(item));
+      data = {
+        type,
         title,
-        body
+        body,
+        imei: stringValue(item.imei),
+        status: stringValue(item.status),
+        actorName: stringValue(item.actorName),
+        panelName: stringValue(item.panelName),
+        buttonId: stringValue(item.buttonId),
+        buttonName: stringValue(item.buttonName),
+        buttonBattery: stringValue(item.buttonBattery),
+        receivedAt: stringValue(item.receivedAt)
       };
-      message.apns = {
-        headers: {
-          'apns-priority': '10'
-        },
-        payload: {
-          aps: {
-            sound: 'default',
-            category: isStateUpdate ? 'NANOSMART_STATE' : 'NANOSMART_ALERT',
-            'content-available': 1
-          }
-        }
+    } else if (isPanelState) {
+      const panelStatus = String(item.panelStatus || '').toLowerCase();
+      const action = String(item.action || '').toLowerCase();
+      const fromApp = item.actionSource === 'APP';
+      body = item.alreadyInState
+        ? (fromApp && item.actorName ? `${item.actorName} intentó ${action}, pero el panel ya estaba ${panelStatus}` : `El panel ya estaba ${panelStatus} · Teclado del panel`)
+        : (fromApp && item.actorName ? `Panel ${panelStatus} correctamente por ${item.actorName}` : `Panel ${panelStatus} desde el teclado`);
+      title = 'Estado NanoSmart';
+      data = {
+        type, title, body,
+        commandId: stringValue(item.id), imei: stringValue(item.imei), action: stringValue(item.action),
+        status: stringValue(item.status), panelStatus: stringValue(item.panelStatus), result: stringValue(item.result),
+        resultCode: stringValue(item.resultCode), resultDescription: stringValue(item.resultDescription),
+        actionSource: stringValue(item.actionSource), actorName: stringValue(item.actorName),
+        alreadyInState: stringValue(item.alreadyInState === true), actionSentAt: stringValue(item.actionSentAt),
+        confirmedAt: stringValue(item.confirmedAt), deliveredAt: stringValue(item.deliveredAt)
       };
     } else {
-      message.android = {
-        priority: 'HIGH',
-        restricted_package_name: 'com.nanocomm.nanosmart.eventos'
+      title = item.eventCode === '640' ? 'Botón Vida' : 'Alerta NanoSmart';
+      body = compactBody(item);
+      data = {
+        type: 'ALERT', title, body, alertId: stringValue(item.id), imei: stringValue(item.imei),
+        eventCode: stringValue(item.eventCode), eventDescription: stringValue(item.eventDescription),
+        partition: stringValue(item.partition), subject: stringValue(item.subject), subjectNumber: stringValue(item.subjectNumber),
+        subjectKind: stringValue(item.subjectKind), zoneName: stringValue(item.zoneName), abonado: stringValue(item.abonado),
+        actionSource: stringValue(item.actionSource), actorName: stringValue(item.actorName), receivedAt: stringValue(item.receivedAt),
+        latitude: stringValue(item.latitude), longitude: stringValue(item.longitude),
+        locationAccuracyMeters: stringValue(item.locationAccuracyMeters), locationCapturedAt: stringValue(item.locationCapturedAt),
+        mapsUrl: mapsUrl(item)
       };
     }
 
-    const payload = {
-      message
-    };
+    const message = { token: pushToken, data };
+    if (platform === 'IOS') {
+      message.notification = { title, body };
+      message.apns = {
+        headers: { 'apns-priority': '10' },
+        payload: { aps: { sound: isLifeStatus ? 'default' : 'default', category: isLifeStatus ? 'NANOSMART_STATUS' : (isPanelState ? 'NANOSMART_STATE' : 'NANOSMART_ALERT'), 'content-available': 1 } }
+      };
+    } else {
+      message.android = { priority: 'HIGH', restricted_package_name: 'com.nanocomm.nanosmart.eventos' };
+    }
 
     const response = await this.#fetchWithTimeout(endpoint, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json; charset=utf-8'
-      },
-      body: JSON.stringify(payload)
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify({ message })
     });
-
     if (response.ok) return response.json();
     if (response.status === 401 && retryAuthentication) {
       this.cachedAccessToken = null;
       this.accessTokenExpiresAt = 0;
       return this.#sendToToken(item, pushToken, false, type, platform);
     }
-
     const responseText = await response.text();
     let parsed = null;
-    try { parsed = JSON.parse(responseText); } catch { /* respuesta no JSON */ }
+    try { parsed = JSON.parse(responseText); } catch { /* no JSON */ }
     const details = parsed?.error?.details || [];
     const fcmError = details.find((detail) => detail?.errorCode)?.errorCode || null;
     const invalidToken = response.status === 404 || fcmError === 'UNREGISTERED';
-    throw new FcmSendError(
-      parsed?.error?.message || `FCM respondió HTTP ${response.status}`,
-      { statusCode: response.status, errorCode: fcmError, invalidToken }
-    );
+    throw new FcmSendError(parsed?.error?.message || `FCM respondió HTTP ${response.status}`, {
+      statusCode: response.status, errorCode: fcmError, invalidToken
+    });
   }
 
   async #getAccessToken() {
-    if (this.cachedAccessToken && this.now() < this.accessTokenExpiresAt - 60000) {
-      return this.cachedAccessToken;
-    }
+    if (this.cachedAccessToken && this.now() < this.accessTokenExpiresAt - 60000) return this.cachedAccessToken;
     if (this.accessTokenPromise) return this.accessTokenPromise;
-
     this.accessTokenPromise = this.#requestAccessToken();
-    try {
-      return await this.accessTokenPromise;
-    } finally {
-      this.accessTokenPromise = null;
-    }
+    try { return await this.accessTokenPromise; }
+    finally { this.accessTokenPromise = null; }
   }
 
   async #requestAccessToken() {
@@ -335,31 +264,18 @@ class FirebasePushService {
     const tokenUri = this.credentials.token_uri || DEFAULT_TOKEN_URI;
     const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
     const claims = Buffer.from(JSON.stringify({
-      iss: this.credentials.client_email,
-      sub: this.credentials.client_email,
-      aud: tokenUri,
-      iat: nowSeconds,
-      exp: nowSeconds + 3600,
-      scope: FCM_SCOPE
+      iss: this.credentials.client_email, sub: this.credentials.client_email, aud: tokenUri,
+      iat: nowSeconds, exp: nowSeconds + 3600, scope: FCM_SCOPE
     })).toString('base64url');
     const unsignedJwt = `${header}.${claims}`;
-    const signature = crypto.sign('RSA-SHA256', Buffer.from(unsignedJwt), this.credentials.private_key)
-      .toString('base64url');
-    const assertion = `${unsignedJwt}.${signature}`;
-
+    const signature = crypto.sign('RSA-SHA256', Buffer.from(unsignedJwt), this.credentials.private_key).toString('base64url');
     const response = await this.#fetchWithTimeout(tokenUri, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion
-      }).toString()
+      body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: `${unsignedJwt}.${signature}` }).toString()
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok || !body.access_token) {
-      throw new FcmSendError(body.error_description || `No se pudo autenticar con Firebase: HTTP ${response.status}`);
-    }
-
+    if (!response.ok || !body.access_token) throw new FcmSendError(body.error_description || `No se pudo autenticar con Firebase: HTTP ${response.status}`);
     this.cachedAccessToken = body.access_token;
     this.accessTokenExpiresAt = this.now() + Number.parseInt(body.expires_in || 3600, 10) * 1000;
     return this.cachedAccessToken;
@@ -380,4 +296,4 @@ class FirebasePushService {
   }
 }
 
-module.exports = { FirebasePushService, FcmSendError, compactBody };
+module.exports = { FirebasePushService, FcmSendError, compactBody, lifeStatusMessage };

@@ -5,12 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
@@ -40,7 +38,6 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
     private val failureAnnounced = mutableSetOf<String>()
     private var gatt: BluetoothGatt? = null
     private var textToSpeech: TextToSpeech? = null
-    private var notificationCharacteristic: BluetoothGattCharacteristic? = null
     private var lastPressHandledAt = 0L
 
     override fun onCreate() {
@@ -91,9 +88,8 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
             updateNotification("Falta permiso Bluetooth")
             return
         }
-        val manager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
-        val adapter = manager.adapter ?: return
-        if (!adapter.isEnabled) {
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+        if (adapter == null || !adapter.isEnabled) {
             LifePrefs.setConnection(this, false)
             updateNotification("Bluetooth apagado")
             return
@@ -117,86 +113,74 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                LifePrefs.setConnection(this@LifeBleService, true)
-                updateNotification("Botón conectado")
-                if (hasConnectPermission()) runCatching { gatt.discoverServices() }
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                LifePrefs.setConnection(this@LifeBleService, false)
-                notificationCharacteristic = null
-                updateNotification("Botón desconectado · reintentando")
-                runCatching { gatt.close() }
-                if (this@LifeBleService.gatt === gatt) this@LifeBleService.gatt = null
-                mainHandler.postDelayed({ connect(LifePrefs.load(this@LifeBleService)) }, RECONNECT_MS)
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> {
+                    LifePrefs.setConnection(this@LifeBleService, true)
+                    LifePrefs.setDisconnectAlertSent(this@LifeBleService, false)
+                    updateNotification("Botón conectado")
+                    if (hasConnectPermission()) runCatching { gatt.discoverServices() }
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    LifePrefs.setConnection(this@LifeBleService, false)
+                    updateNotification("Botón desconectado · reintentando")
+                    runCatching { gatt.close() }
+                    if (this@LifeBleService.gatt === gatt) this@LifeBleService.gatt = null
+                    mainHandler.postDelayed({ connect(LifePrefs.load(this@LifeBleService)) }, RECONNECT_MS)
+                }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) return
-            val characteristic = findNotificationCharacteristic(gatt.services)
-            if (characteristic == null) {
-                updateNotification("Conectado · sin canal de pulsación BLE")
+            val button = gatt.getService(BUTTON_SERVICE_UUID)?.getCharacteristic(BUTTON_CHARACTERISTIC_UUID)
+            if (button == null || button.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE == 0) {
+                LifePrefs.setConnection(this@LifeBleService, false)
+                updateNotification("El dispositivo no es un Climax BL3 compatible")
                 return
             }
-            notificationCharacteristic = characteristic
-            enableNotifications(gatt, characteristic)
-            mainHandler.postDelayed({ readBattery(gatt) }, 1200L)
+            if (!enableSubscription(gatt, button, indicate = true)) {
+                updateNotification("No se pudo activar el canal de pulsación")
+                return
+            }
+            mainHandler.postDelayed({ subscribeBattery(gatt) }, 900L)
         }
 
         @Deprecated("Deprecated in API 33")
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            handleValue(characteristic.value ?: return)
+            routeChanged(characteristic, characteristic.value ?: return)
         }
 
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            handleValue(value)
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            routeChanged(characteristic, value)
         }
 
         @Deprecated("Deprecated in API 33")
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) handleBattery(characteristic, characteristic.value)
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == BATTERY_LEVEL_UUID) {
+                handleBattery(characteristic.value)
+            }
         }
 
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) handleBattery(characteristic, value)
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == BATTERY_LEVEL_UUID) handleBattery(value)
         }
     }
 
-    private fun findNotificationCharacteristic(services: List<BluetoothGattService>): BluetoothGattCharacteristic? {
-        return services.asSequence()
-            .flatMap { it.characteristics.asSequence() }
-            .firstOrNull { characteristic ->
-                characteristic.uuid != BATTERY_LEVEL_UUID &&
-                    (characteristic.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY != 0 ||
-                        characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0)
-            }
+    private fun routeChanged(characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+        when (characteristic.uuid) {
+            BUTTON_CHARACTERISTIC_UUID -> handleButtonValue(value)
+            BATTERY_LEVEL_UUID -> handleBattery(value)
+        }
     }
 
     @Suppress("MissingPermission")
-    private fun enableNotifications(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-        if (!hasConnectPermission()) return
-        if (!gatt.setCharacteristicNotification(characteristic, true)) {
-            updateNotification("No se pudo activar la escucha BLE")
-            return
-        }
-        val descriptor = characteristic.getDescriptor(CCCD_UUID) ?: return
-        val indication = characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE != 0
-        val value = if (indication) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeDescriptor(descriptor, value)
+    private fun enableSubscription(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, indicate: Boolean): Boolean {
+        if (!hasConnectPermission()) return false
+        if (!gatt.setCharacteristicNotification(characteristic, true)) return false
+        val descriptor = characteristic.getDescriptor(CCCD_UUID) ?: return false
+        val value = if (indicate) BluetoothGattDescriptor.ENABLE_INDICATION_VALUE else BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(descriptor, value) == android.bluetooth.BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             run {
@@ -207,29 +191,37 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
     }
 
     @Suppress("MissingPermission")
-    private fun readBattery(gatt: BluetoothGatt) {
+    private fun subscribeBattery(gatt: BluetoothGatt) {
         if (!hasConnectPermission()) return
         val battery = gatt.getService(BATTERY_SERVICE_UUID)?.getCharacteristic(BATTERY_LEVEL_UUID) ?: return
+        enableSubscription(gatt, battery, indicate = false)
         runCatching { gatt.readCharacteristic(battery) }
     }
 
-    private fun handleBattery(characteristic: BluetoothGattCharacteristic, value: ByteArray?) {
-        if (characteristic.uuid != BATTERY_LEVEL_UUID || value.isNullOrEmpty()) return
+    private fun handleBattery(value: ByteArray?) {
+        if (value.isNullOrEmpty()) return
         val battery = value[0].toInt() and 0xFF
+        if (battery !in 0..100) return
         LifePrefs.setBattery(this, battery)
+        if (battery <= LOW_BATTERY_PERCENT && !LifePrefs.batteryLowAlertSent(this)) {
+            LifePrefs.setBatteryLowAlertSent(this, true)
+            sendLifeStatus("BATTERY_LOW", battery)
+        } else if (battery > LOW_BATTERY_PERCENT && LifePrefs.batteryLowAlertSent(this)) {
+            LifePrefs.setBatteryLowAlertSent(this, false)
+            sendLifeStatus("BATTERY_RESTORED", battery)
+        }
         updateNotification(if (LifePrefs.connected(this)) "Botón conectado · batería $battery%" else "Botón desconectado")
     }
 
-    private fun handleValue(value: ByteArray) {
-        if (value.isEmpty() || (value[0].toInt() and 0xFF) != 0x01) return
+    private fun handleButtonValue(value: ByteArray) {
+        if (value.size != 1 || (value[0].toInt() and 0xFF) != 0x01) return
         val now = System.currentTimeMillis()
         if (now - lastPressHandledAt < PRESS_DEBOUNCE_MS) return
         lastPressHandledAt = now
         LifePrefs.setLastPress(this, now)
         val config = LifePrefs.load(this)
         if (!config.validForService()) return
-        val event = LifeSender.newEvent(this, config, LifePrefs.battery(this))
-        LifePrefs.enqueue(this, event)
+        LifePrefs.enqueue(this, LifeSender.newEvent(this, config, LifePrefs.battery(this)))
         LifePrefs.setServerState(this, "Enviando pedido de ayuda…")
         flushQueue()
     }
@@ -240,24 +232,40 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
             try {
                 val config = LifePrefs.load(this)
                 if (!config.validForService()) return@execute
-                val pending = LifePrefs.queue(this)
                 val remaining = mutableListOf<PendingLifeEvent>()
-                for (event in pending) {
-                    try {
-                        LifeSender.send(config, event)
-                        failureAnnounced.remove(event.requestId)
+                for (pending in LifePrefs.queue(this)) {
+                    val result = LifeSender.attempt(config, pending)
+                    if (result.event.complete) {
+                        failureAnnounced.remove(pending.requestId)
                         LifePrefs.setServerState(this, "Pedido enviado")
                         announceSuccess()
-                    } catch (error: Exception) {
-                        remaining.add(event)
+                    } else {
+                        remaining += result.event
                         LifePrefs.setServerState(this, "Pendiente por falta de conexión")
-                        if (failureAnnounced.add(event.requestId)) announceNoInternet()
+                        if (failureAnnounced.add(pending.requestId)) announceNoInternet()
                     }
                 }
                 LifePrefs.replaceQueue(this, remaining)
             } finally {
                 flushing.set(false)
             }
+        }
+    }
+
+    private fun sendLifeStatus(type: String, battery: Int? = LifePrefs.battery(this)) {
+        val config = LifePrefs.load(this)
+        if (!config.validForService()) return
+        io.execute {
+            runCatching { LifeSender.sendStatus(config, type, battery) }
+        }
+    }
+
+    private fun checkDisconnectAlert() {
+        if (LifePrefs.connected(this)) return
+        val since = LifePrefs.disconnectedSince(this)
+        if (since > 0L && System.currentTimeMillis() - since >= DISCONNECT_ALERT_MS && !LifePrefs.disconnectAlertSent(this)) {
+            LifePrefs.setDisconnectAlertSent(this, true)
+            sendLifeStatus("DISCONNECTED")
         }
     }
 
@@ -275,12 +283,7 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
     private fun announceNoInternet() {
         mainHandler.post {
             vibrate()
-            textToSpeech?.speak(
-                "Ayuda no enviada por falta de conexión a Internet",
-                TextToSpeech.QUEUE_FLUSH,
-                null,
-                "vida-offline"
-            )
+            textToSpeech?.speak("Ayuda no enviada por falta de conexión a Internet", TextToSpeech.QUEUE_FLUSH, null, "vida-offline")
         }
     }
 
@@ -291,9 +294,8 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
             @Suppress("DEPRECATION")
             getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            vibrator.vibrate(VibrationEffect.createOneShot(700L, VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) vibrator.vibrate(VibrationEffect.createOneShot(700L, VibrationEffect.DEFAULT_AMPLITUDE))
+        else {
             @Suppress("DEPRECATION")
             vibrator.vibrate(700L)
         }
@@ -309,8 +311,9 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
             val config = LifePrefs.load(this@LifeBleService)
             if (config.enabled) {
                 if (!LifePrefs.connected(this@LifeBleService)) connect(config)
+                checkDisconnectAlert()
                 flushQueue()
-                runCatching { gatt?.let(::readBattery) }
+                runCatching { gatt?.let(::subscribeBattery) }
                 mainHandler.postDelayed(this, RETRY_MS)
             }
         }
@@ -318,8 +321,7 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL_ID, "Botón Vida", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "Mantiene conectado el botón de asistencia por Bluetooth"
                 setSound(null, null)
@@ -328,11 +330,8 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun buildNotification(text: String): android.app.Notification {
-        val intent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
+            this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
@@ -355,13 +354,16 @@ class LifeBleService : Service(), TextToSpeech.OnInitListener {
         private const val RECONNECT_MS = 10_000L
         private const val RETRY_MS = 30_000L
         private const val PRESS_DEBOUNCE_MS = 1500L
+        private const val DISCONNECT_ALERT_MS = 120_000L
+        private const val LOW_BATTERY_PERCENT = 20
+        private val BUTTON_SERVICE_UUID = UUID.fromString("ccaf68a3-dd38-4c61-bfd2-9b14027605ea")
+        private val BUTTON_CHARACTERISTIC_UUID = UUID.fromString("1f1e4671-b051-4a30-837c-86f3b11cc5ae")
         private val BATTERY_SERVICE_UUID = UUID.fromString("0000180f-0000-1000-8000-00805f9b34fb")
         private val BATTERY_LEVEL_UUID = UUID.fromString("00002a19-0000-1000-8000-00805f9b34fb")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
         fun start(context: Context) {
-            val intent = Intent(context, LifeBleService::class.java)
-            ContextCompat.startForegroundService(context, intent)
+            ContextCompat.startForegroundService(context, Intent(context, LifeBleService::class.java))
         }
     }
 }
