@@ -7,7 +7,7 @@ on:
 permissions:
   contents: write
 
-# trigger-build: server-runtime-dependencies-2026-08-21
+# trigger-build: gps-fix-2026-08-21
 jobs:
   build-and-test:
     if: github.actor != 'github-actions[bot]'
@@ -25,63 +25,6 @@ jobs:
 
           server = Path('server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js')
           s = server.read_text(encoding='utf-8')
-          marker = "async function forwardLifeStatusToPhones(status)"
-          if marker not in s:
-              anchor = "function sendUdpPayload(payload, remote) {"
-              insert = r'''async function forwardLifeStatusToPhones(status) {
-            const targets = registry.listPushTargets(status.imei);
-            const result = await pushService.sendLifeStatus(status, targets);
-            runtimeState.pushMessagesSent += result.sent;
-            runtimeState.pushErrors += result.errors;
-            runtimeState.invalidPushTokensRemoved += registry.clearPushTokens(result.invalidTargets);
-            if (result.sent > 0) {
-              console.log(`[FCM] Estado Botón Vida ${status.status} enviado a ${result.sent}/${result.requested} celular(es)`);
-            } else if (result.requested > 0 && result.errors > 0) {
-              console.warn(`[FCM] No se pudo notificar estado Botón Vida: ${(result.errorMessages || []).join(' | ')}`);
-            }
-          }
-
-          '''
-              if anchor not in s:
-                  raise SystemExit('No se encontró ancla sendUdpPayload')
-              s = s.replace(anchor, insert + anchor, 1)
-
-          route_marker = "pathname === '/api/app/life/status'"
-          if route_marker not in s:
-              anchor = "      if (req.method === 'POST' && pathname === '/api/app/emergency') {"
-              route = r'''      if (req.method === 'POST' && pathname === '/api/app/life/status') {
-            if (!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())) {
-              throw new RegistryError('Esta ruta requiere una credencial válida de NanoSmart', 403, 'LIFE_CREDENTIAL_REQUIRED');
-            }
-            const body = await readJsonBody(req);
-            const statusCode = String(body.status || '').trim().toUpperCase();
-            if (!['DISCONNECTED', 'BATTERY_LOW', 'BATTERY_RESTORED'].includes(statusCode)) {
-              throw new RegistryError('Estado Botón Vida inválido', 400, 'INVALID_LIFE_STATUS');
-            }
-            const battery = optionalNumber(body.buttonBattery);
-            const statusEvent = {
-              imei: installation.imei,
-              status: statusCode,
-              actorName: String(body.name || installation.name || '').trim().slice(0, 80),
-              panelName: String(body.panelName || '').trim().slice(0, 120),
-              buttonId: String(body.buttonId || '').trim().slice(0, 160),
-              buttonName: String(body.buttonName || '').trim().slice(0, 120),
-              buttonBattery: battery !== null && battery >= 0 && battery <= 100 ? battery : null,
-              receivedAt: new Date().toISOString()
-            };
-            void forwardLifeStatusToPhones(statusEvent).catch((error) => {
-              runtimeState.pushErrors += 1;
-              console.error(`[FCM] Error notificando estado Botón Vida: ${error.stack || error.message}`);
-            });
-            json(res, 202, { ok: true, status: statusEvent });
-            return;
-          }
-
-          '''
-              if anchor not in s:
-                  raise SystemExit('No se encontró ancla /api/app/emergency')
-              s = s.replace(anchor, route + anchor, 1)
-
           s = s.replace(
               "String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON'",
               "!['LIFE_BUTTON', 'MOBILE'].includes(String(installation.purpose || 'MOBILE').toUpperCase())"
@@ -98,15 +41,177 @@ jobs:
           t = t.replace('append(",00,10,4G,$E")', 'append(",00,10,4G,\\$E")')
           core.write_text(t, encoding='utf-8')
 
+          integration = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt')
+          text = integration.read_text(encoding='utf-8')
+          start = text.index('object LifeButtonLocationProvider {')
+          end = text.index('\ninternal fun Long.toLifeIsoTimestamp()', start)
+          new_provider = r'''object LifeButtonLocationProvider {
+              private const val TIMEOUT_MS = 10_000L
+              private const val MAX_CURRENT_AGE_MS = 60_000L
+              private const val MAX_FALLBACK_AGE_MS = 60_000L
+
+              @SuppressLint("MissingPermission")
+              fun requestFresh(context: Context, callback: (EmergencyLocation?) -> Unit) {
+                  val appContext = context.applicationContext
+                  val fine = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                      PackageManager.PERMISSION_GRANTED
+                  val coarse = ContextCompat.checkSelfPermission(appContext, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                      PackageManager.PERMISSION_GRANTED
+                  if (!fine && !coarse) {
+                      callback(null)
+                      return
+                  }
+
+                  val manager = appContext.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                  val enabledProviders = buildList {
+                      if (runCatching { manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER) }.getOrDefault(false)) {
+                          add(LocationManager.NETWORK_PROVIDER)
+                      }
+                      if (runCatching { manager.isProviderEnabled(LocationManager.GPS_PROVIDER) }.getOrDefault(false)) {
+                          add(LocationManager.GPS_PROVIDER)
+                      }
+                  }.distinct()
+
+                  fun accepted(location: Location?, maxAgeMs: Long): EmergencyLocation? {
+                      if (location == null) return null
+                      val now = System.currentTimeMillis()
+                      val capturedAt = location.time.takeIf { it > 0L } ?: now
+                      val age = (now - capturedAt.coerceAtMost(now)).coerceAtLeast(0L)
+                      if (age > maxAgeMs) return null
+                      if (!EmergencyLocationPolicy.validCoordinates(location.latitude, location.longitude)) return null
+                      return EmergencyLocation(
+                          latitude = location.latitude,
+                          longitude = location.longitude,
+                          accuracyMeters = location.accuracy.takeIf { location.hasAccuracy() },
+                          capturedAtMillis = capturedAt
+                      )
+                  }
+
+                  fun recentLastKnown(): EmergencyLocation? {
+                      val candidates = listOf(
+                          LocationManager.NETWORK_PROVIDER,
+                          LocationManager.GPS_PROVIDER,
+                          LocationManager.PASSIVE_PROVIDER
+                      ).mapNotNull { provider ->
+                          runCatching { manager.getLastKnownLocation(provider) }.getOrNull()
+                      }.mapNotNull { accepted(it, MAX_FALLBACK_AGE_MS) }
+                      return candidates.minWithOrNull(
+                          compareBy<EmergencyLocation> { it.accuracyMeters ?: Float.MAX_VALUE }
+                              .thenByDescending { it.capturedAtMillis }
+                      )
+                  }
+
+                  if (enabledProviders.isEmpty()) {
+                      callback(recentLastKnown())
+                      return
+                  }
+
+                  val delivered = AtomicBoolean(false)
+                  val handler = Handler(Looper.getMainLooper())
+                  val cancellations = mutableListOf<CancellationSignal>()
+
+                  fun finish(location: EmergencyLocation?) {
+                      if (!delivered.compareAndSet(false, true)) return
+                      cancellations.forEach { runCatching { it.cancel() } }
+                      callback(location ?: recentLastKnown())
+                  }
+
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                      enabledProviders.forEach { provider ->
+                          val cancellation = CancellationSignal()
+                          cancellations += cancellation
+                          runCatching {
+                              manager.getCurrentLocation(
+                                  provider,
+                                  cancellation,
+                                  ContextCompat.getMainExecutor(appContext)
+                              ) { location ->
+                                  accepted(location, MAX_CURRENT_AGE_MS)?.let(::finish)
+                              }
+                          }
+                      }
+                      handler.postDelayed({ finish(null) }, TIMEOUT_MS)
+                      return
+                  }
+
+                  @Suppress("DEPRECATION")
+                  val listener = object : android.location.LocationListener {
+                      override fun onLocationChanged(location: Location) {
+                          accepted(location, MAX_CURRENT_AGE_MS)?.let {
+                              runCatching { manager.removeUpdates(this) }
+                              finish(it)
+                          }
+                      }
+                      override fun onStatusChanged(provider: String?, status: Int, extras: android.os.Bundle?) = Unit
+                      override fun onProviderEnabled(provider: String) = Unit
+                      override fun onProviderDisabled(provider: String) = Unit
+                  }
+                  enabledProviders.forEach { provider ->
+                      runCatching {
+                          @Suppress("DEPRECATION")
+                          manager.requestSingleUpdate(provider, listener, Looper.getMainLooper())
+                      }
+                  }
+                  handler.postDelayed({
+                      runCatching { manager.removeUpdates(listener) }
+                      finish(null)
+                  }, TIMEOUT_MS)
+              }
+          }
+          '''
+          text = text[:start] + new_provider + text[end:]
+          integration.write_text(text, encoding='utf-8')
+
+          service = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt')
+          svc = service.read_text(encoding='utf-8')
+          old_callback = '''        LifeButtonLocationProvider.requestFresh(this) { location ->
+              LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
+                  current.copy(locationReady = true, location = location)
+              }
+              flushQueue()
+          }
+          '''
+          new_callback = '''        LifeButtonLocationProvider.requestFresh(this) { location ->
+              fun persistWhenIdle() {
+                  if (flushing.get()) {
+                      mainHandler.postDelayed({ persistWhenIdle() }, 100L)
+                      return
+                  }
+                  LifeButtonPrefs.updateEvent(this, event.requestId) { current ->
+                      current.copy(locationReady = true, location = location)
+                  }
+                  LifeButtonPrefs.setServerState(
+                      this,
+                      config.imei,
+                      if (location != null) "Ubicación obtenida · enviando pedido…" else "Ubicación no disponible · enviando pedido…"
+                  )
+                  flushQueue()
+              }
+              persistWhenIdle()
+          }
+          '''
+          if old_callback not in svc:
+              raise SystemExit('No se encontró callback GPS en LifeButtonService.kt')
+          svc = svc.replace(old_callback, new_callback, 1)
+          svc = svc.replace(
+              'LifeButtonPrefs.setServerState(this, event.imei, "Pedido enviado")',
+              'LifeButtonPrefs.setServerState(this, event.imei, if (event.location != null) "Pedido enviado · ubicación incluida" else "Pedido enviado · sin ubicación")',
+              1
+          )
+          svc = svc.replace('private const val LOCATION_FALLBACK_MS = 10_000L', 'private const val LOCATION_FALLBACK_MS = 12_000L')
+          service.write_text(svc, encoding='utf-8')
+
       - name: Commit finalized source
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js \
-                  android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt
+                  android-src/source_package_v32/vida/src/main/java/com/nanocomm/nanosmart/vida/LifeCore.kt \
+                  android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonIntegration.kt \
+                  android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/LifeButtonService.kt
           if ! git diff --cached --quiet; then
-            git commit -m "Finalize integrated Botón Vida server support"
+            git commit -m "Fix Botón Vida fresh location acquisition"
           fi
 
       - name: Setup Node
@@ -122,23 +227,6 @@ jobs:
           node -e "require('qrcode'); require('./src/pairing')"
           node --check server.js
           npm test
-          node server.js > server-startup-test.log 2>&1 &
-          SERVER_PID=$!
-          READY=0
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18082/api/health >/dev/null; then
-              READY=1
-              break
-            fi
-            sleep 0.5
-          done
-          if [ "$READY" -ne 1 ]; then
-            cat server-startup-test.log
-            kill "$SERVER_PID" 2>/dev/null || true
-            exit 1
-          fi
-          kill "$SERVER_PID" 2>/dev/null || true
-          wait "$SERVER_PID" 2>/dev/null || true
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -160,25 +248,25 @@ jobs:
         run: |
           rm -rf deliverables
           mkdir -p deliverables
-          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_Integrado-debug.apk
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX-debug.apk
           cp android-src/source_package_v32/vida/build/outputs/apk/debug/vida-debug.apk deliverables/NanoSmart_Boton_Vida_Standalone_1.0.0-test.apk
-          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_Integrado_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
           (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640_LISTO.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/data/*' '*/secrets/*' '*/server-startup-test.log')
-          printf '%s\n' "Build OK integrated app + runnable server $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
+          printf '%s\n' "Build OK GPS fix $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/BUILD_OK.txt
 
       - name: Commit deliverables
         shell: bash
         run: |
           git add -f deliverables
           if ! git diff --cached --quiet; then
-            git commit -m "Build runnable NanoSmart server package"
+            git commit -m "Build Botón Vida GPS fix test deliverables"
           fi
           git push origin HEAD:boton-vida-640
 
       - name: Upload deliverables
         uses: actions/upload-artifact@v4
         with:
-          name: nanosmart-boton-vida-integrated-test
+          name: nanosmart-boton-vida-gps-fix
           path: deliverables/*
           if-no-files-found: error
           retention-days: 14
