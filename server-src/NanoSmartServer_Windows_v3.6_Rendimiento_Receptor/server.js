@@ -337,6 +337,19 @@ async function forwardPanelStateToPhones(panelState) {
   else if (result.requested > 0 && result.errors > 0) console.warn(`[FCM] No se pudo notificar el estado del panel ${panelState.imei}: ${(result.errorMessages || []).join(' | ')}`);
 }
 
+async function forwardLifeStatusToPhones(status) {
+  const targets = registry.listPushTargets(status.imei);
+  const result = await pushService.sendLifeStatus(status, targets);
+  runtimeState.pushMessagesSent += result.sent;
+  runtimeState.pushErrors += result.errors;
+  runtimeState.invalidPushTokensRemoved += registry.clearPushTokens(result.invalidTargets);
+  if (result.sent > 0) {
+    console.log(`[FCM] Estado Botón Vida ${status.status} enviado a ${result.sent}/${result.requested} celular(es)`);
+  } else if (result.requested > 0 && result.errors > 0) {
+    console.warn(`[FCM] No se pudo notificar estado Botón Vida: ${(result.errorMessages || []).join(' | ')}`);
+  }
+}
+
 function sendUdpPayload(payload, remote) {
   return new Promise((resolve, reject) => {
     udpServer.send(Buffer.from(payload, 'utf8'), remote.port, remote.address, (error) => error ? reject(error) : resolve());
@@ -683,6 +696,34 @@ const httpServer = http.createServer(async (req, res) => {
         await trySendInquiry(currentInstallation.imei);
         json(res, 202, { command: commandService.getCommand(created.id, currentInstallation.imei) }); return;
       }
+      if (req.method === 'POST' && pathname === '/api/app/life/status') {
+  if (String(installation.purpose || '').toUpperCase() !== 'LIFE_BUTTON') {
+    throw new RegistryError('Esta ruta requiere una credencial Botón Vida', 403, 'LIFE_CREDENTIAL_REQUIRED');
+  }
+  const body = await readJsonBody(req);
+  const statusCode = String(body.status || '').trim().toUpperCase();
+  if (!['DISCONNECTED', 'BATTERY_LOW', 'BATTERY_RESTORED'].includes(statusCode)) {
+    throw new RegistryError('Estado Botón Vida inválido', 400, 'INVALID_LIFE_STATUS');
+  }
+  const battery = optionalNumber(body.buttonBattery);
+  const statusEvent = {
+    imei: installation.imei,
+    status: statusCode,
+    actorName: String(body.name || installation.name || '').trim().slice(0, 80),
+    panelName: String(body.panelName || '').trim().slice(0, 120),
+    buttonId: String(body.buttonId || '').trim().slice(0, 160),
+    buttonName: String(body.buttonName || '').trim().slice(0, 120),
+    buttonBattery: battery !== null && battery >= 0 && battery <= 100 ? battery : null,
+    receivedAt: new Date().toISOString()
+  };
+  void forwardLifeStatusToPhones(statusEvent).catch((error) => {
+    runtimeState.pushErrors += 1;
+    console.error(`[FCM] Error notificando estado Botón Vida: ${error.stack || error.message}`);
+  });
+  json(res, 202, { ok: true, status: statusEvent });
+  return;
+}
+
       if (req.method === 'POST' && pathname === '/api/app/emergency') {
         const body = await readJsonBody(req);
         const existing = findExistingLifeRequest(installation, body);
