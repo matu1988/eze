@@ -115,8 +115,7 @@ const CONTACT_ID_EVENTS = Object.freeze({
   '601': { description: 'Test manual', category: 'TEST', subjectKind: 'ZONA' },
   '602': { description: 'Test automático', category: 'TEST', subjectKind: 'ZONA' },
   '603': { description: 'Test automático de radio', category: 'TEST', subjectKind: 'ZONA' },
-  '608': { description: 'Test automático con falla', category: 'TEST', subjectKind: 'ZONA' },
-  '640': { description: 'Botón Vida', category: 'ALARMA', subjectKind: 'USUARIO' }
+  '608': { description: 'Test automático con falla', category: 'TEST', subjectKind: 'ZONA' }
 });
 
 const QUALIFIER_DESCRIPTIONS = Object.freeze({
@@ -206,9 +205,8 @@ function shouldForwardContactEvent(contactId, options = {}) {
     '135', '136', '137', '138', '139'
   ];
   const eventCodes = [
-    ...(forwarding.eventCodes || ['100', '110', '120', '640']),
-    ...requiredBurglaryEventCodes,
-    '640'
+    ...(forwarding.eventCodes || ['100', '110', '120']),
+    ...requiredBurglaryEventCodes
   ]
     .map((value) => String(value).toUpperCase());
   const qualifiers = (forwarding.qualifiers || ['1'])
