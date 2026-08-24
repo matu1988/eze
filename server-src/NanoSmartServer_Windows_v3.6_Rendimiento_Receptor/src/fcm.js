@@ -117,7 +117,16 @@ class FirebasePushService {
     };
   }
 
-  async sendAlert(event, targets) { return this.#sendToTargets(event, targets, 'ALERT'); }
+  async sendAlert(event, targets) {
+    const originInstallationId = String(event?.actorInstallationId || '').trim();
+    const isOwnLifeButtonEvent = String(event?.eventCode || '') === '640' &&
+      String(event?.actionSource || '').trim().toUpperCase() === 'BOTON_VIDA' &&
+      originInstallationId !== '';
+    const filteredTargets = isOwnLifeButtonEvent && Array.isArray(targets)
+      ? targets.filter((target) => String(target?.installationId || '').trim() !== originInstallationId)
+      : targets;
+    return this.#sendToTargets(event, filteredTargets, 'ALERT');
+  }
   async sendDeviceCommand(command, targets) { return this.#sendToTargets(command, targets, 'DEVICE_COMMAND'); }
   async sendPanelState(panelState, targets) { return this.#sendToTargets(panelState, targets, 'PANEL_STATE'); }
   async sendLifeStatus(status, targets) { return this.#sendToTargets(status, targets, 'LIFE_STATUS'); }
