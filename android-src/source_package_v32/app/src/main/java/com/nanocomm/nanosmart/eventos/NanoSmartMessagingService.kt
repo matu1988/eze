@@ -33,6 +33,15 @@ class NanoSmartMessagingService : FirebaseMessagingService() {
         val hasValidLocation = latitude != null && longitude != null &&
             EmergencyLocationPolicy.validCoordinates(latitude, longitude)
 
+        // Protección de respaldo: si por algún motivo el servidor devolviera al mismo
+        // teléfono el 640 que acaba de originar con su Botón Vida, no activar alarma.
+        val lastLifeButtonPress = if (imei.isNotEmpty()) LifeButtonPrefs.lastPress(this, imei) else 0L
+        val lifeButtonEchoAge = System.currentTimeMillis() - lastLifeButtonPress
+        val isOwnLifeButtonEcho = message.data["eventCode"]?.trim() == "640" &&
+            actionSource == "BOTON_VIDA" &&
+            lastLifeButtonPress > 0L &&
+            lifeButtonEchoAge in 0..OWN_LIFE_BUTTON_ECHO_WINDOW_MS
+
         val deviceStatus = message.data["panelStatus"]
             ?.trim()
             ?.uppercase()
@@ -47,6 +56,11 @@ class NanoSmartMessagingService : FirebaseMessagingService() {
                 Prefs.setStatusForImei(this, imei, deviceStatus)
                 Prefs.setLastActionActorForImei(this, imei, actorName, actionSource)
             }
+        }
+
+        if (isOwnLifeButtonEcho) {
+            PushUiRefreshDispatcher.schedule(this)
+            return
         }
 
         val shouldSoundAlarm = AudibleAlarmPolicy.shouldSound(message.data)
@@ -128,6 +142,7 @@ class NanoSmartMessagingService : FirebaseMessagingService() {
     }
 
     companion object {
+        private const val OWN_LIFE_BUTTON_ECHO_WINDOW_MS = 30_000L
         const val CHANNEL_ID = "nanosmart_alertas"
         const val ACTION_PUSH_ALERT = "com.nanocomm.nanosmart.eventos.PUSH_ALERT"
         const val EXTRA_ALERT_ID = "alert_id"
