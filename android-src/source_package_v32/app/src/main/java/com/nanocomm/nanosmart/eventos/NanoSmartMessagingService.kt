@@ -33,12 +33,11 @@ class NanoSmartMessagingService : FirebaseMessagingService() {
         val hasValidLocation = latitude != null && longitude != null &&
             EmergencyLocationPolicy.validCoordinates(latitude, longitude)
 
-        // Protección de respaldo: si por algún motivo el servidor devolviera al mismo
-        // teléfono el 640 que acaba de originar con su Botón Vida, no activar alarma.
+        // Protección de respaldo: cualquier 640 que vuelva al mismo teléfono inmediatamente
+        // después de una pulsación física local se considera eco propio, venga por HTTP o UDP.
         val lastLifeButtonPress = if (imei.isNotEmpty()) LifeButtonPrefs.lastPress(this, imei) else 0L
         val lifeButtonEchoAge = System.currentTimeMillis() - lastLifeButtonPress
         val isOwnLifeButtonEcho = message.data["eventCode"]?.trim() == "640" &&
-            actionSource == "BOTON_VIDA" &&
             lastLifeButtonPress > 0L &&
             lifeButtonEchoAge in 0..OWN_LIFE_BUTTON_ECHO_WINDOW_MS
 
