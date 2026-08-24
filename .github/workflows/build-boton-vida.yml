@@ -1,4 +1,4 @@
-name: Build NanoSmart Boton Vida GPS Fix
+name: Build NanoSmart Boton Vida No Echo
 
 on:
   push:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 jobs:
-  build-app:
+  build-and-test:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -16,6 +16,60 @@ jobs:
         with:
           ref: boton-vida-640
           fetch-depth: 0
+
+      - name: Apply Boton Vida originator exclusion
+        shell: python
+        run: |
+          from pathlib import Path
+
+          server_path = Path('server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js')
+          server = server_path.read_text(encoding='utf-8')
+          old_server = '''  const targets = registry.listPushTargets(event.imei);\n  const result = await pushService.sendAlert(event, targets);'''
+          new_server = '''  const allTargets = registry.listPushTargets(event.imei);\n  const originInstallationId = String(event.actorInstallationId || '').trim();\n  const isOwnLifeButtonEvent = event.eventCode === '640' &&\n    String(event.actionSource || '').trim().toUpperCase() === 'BOTON_VIDA' &&\n    originInstallationId !== '';\n  const targets = isOwnLifeButtonEvent\n    ? allTargets.filter((target) => target.installationId !== originInstallationId)\n    : allTargets;\n  if (isOwnLifeButtonEvent && targets.length !== allTargets.length) {\n    console.log(`[FCM] Botón Vida ${event.id}: celular originador excluido de su propia alarma`);\n  }\n  const result = await pushService.sendAlert(event, targets);'''
+          if old_server not in server:
+              if 'celular originador excluido de su propia alarma' not in server:
+                  raise SystemExit('No se encontró el bloque forwardAlertToPhones esperado')
+          else:
+              server = server.replace(old_server, new_server, 1)
+              server_path.write_text(server, encoding='utf-8')
+
+          app_path = Path('android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/NanoSmartMessagingService.kt')
+          app = app_path.read_text(encoding='utf-8')
+          anchor = '''        val hasValidLocation = latitude != null && longitude != null &&\n            EmergencyLocationPolicy.validCoordinates(latitude, longitude)\n'''
+          insertion = '''        val hasValidLocation = latitude != null && longitude != null &&\n            EmergencyLocationPolicy.validCoordinates(latitude, longitude)\n\n        // Segunda protección: si por algún motivo el servidor devolviera al mismo teléfono\n        // el 640 que acaba de originar mediante su Botón Vida, no activar sirena ni notificación.\n        val lastLifeButtonPress = if (imei.isNotEmpty()) LifeButtonPrefs.lastPress(this, imei) else 0L\n        val lifeButtonEchoAge = System.currentTimeMillis() - lastLifeButtonPress\n        val isOwnLifeButtonEcho = message.data["eventCode"]?.trim() == "640" &&\n            actionSource == "BOTON_VIDA" &&\n            lastLifeButtonPress > 0L &&\n            lifeButtonEchoAge in 0..OWN_LIFE_BUTTON_ECHO_WINDOW_MS\n'''
+          if 'isOwnLifeButtonEcho' not in app:
+              if anchor not in app:
+                  raise SystemExit('No se encontró el bloque de ubicación esperado en NanoSmartMessagingService.kt')
+              app = app.replace(anchor, insertion, 1)
+
+          sound_anchor = '''        val shouldSoundAlarm = AudibleAlarmPolicy.shouldSound(message.data)\n'''
+          sound_replacement = '''        if (isOwnLifeButtonEcho) {\n            PushUiRefreshDispatcher.schedule(this)\n            return\n        }\n\n        val shouldSoundAlarm = AudibleAlarmPolicy.shouldSound(message.data)\n'''
+          if 'if (isOwnLifeButtonEcho)' not in app:
+              if sound_anchor not in app:
+                  raise SystemExit('No se encontró shouldSoundAlarm en NanoSmartMessagingService.kt')
+              app = app.replace(sound_anchor, sound_replacement, 1)
+
+          companion_anchor = '''    companion object {\n        const val CHANNEL_ID = "nanosmart_alertas"\n'''
+          companion_replacement = '''    companion object {\n        private const val OWN_LIFE_BUTTON_ECHO_WINDOW_MS = 30_000L\n        const val CHANNEL_ID = "nanosmart_alertas"\n'''
+          if 'OWN_LIFE_BUTTON_ECHO_WINDOW_MS' not in app.split('companion object', 1)[-1]:
+              if companion_anchor not in app:
+                  raise SystemExit('No se encontró companion object en NanoSmartMessagingService.kt')
+              app = app.replace(companion_anchor, companion_replacement, 1)
+
+          app_path.write_text(app, encoding='utf-8')
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install and test server
+        working-directory: server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor
+        shell: bash
+        run: |
+          npm ci --omit=dev
+          node --check server.js
+          npm test
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -32,32 +86,37 @@ jobs:
         working-directory: android-src/source_package_v32
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Package APK and source
+      - name: Package test version
         shell: bash
         run: |
           mkdir -p deliverables
-          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk
-          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
-          printf '%s\n' "Build OK Boton Vida GPS FIX FINAL $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/GPSFIX_FINAL_BUILD_OK.txt
+          cp android-src/source_package_v32/app/build/outputs/apk/debug/app-debug.apk deliverables/NanoSmart_Eventos_3.8.0_BotonVida_NOECHO-debug.apk
+          (cd android-src && zip -qr ../deliverables/NanoSmart_Android_BotonVida_NOECHO_Source.zip source_package_v32 -x '*/build/*' '*/.gradle/*')
+          (cd server-src && zip -qr ../deliverables/NanoSmart_Server_v3.6_BotonVida640_NOECHO_LISTO.zip NanoSmartServer_Windows_v3.6_Rendimiento_Receptor -x '*/data/*' '*/secrets/*' '*/server-startup-test.log')
+          printf '%s\n' "Build OK Boton Vida NOECHO $(date -u +%Y-%m-%dT%H:%M:%SZ)" > deliverables/NOECHO_BUILD_OK.txt
 
-      - name: Commit deliverables
+      - name: Commit source and deliverables
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk \
-                     deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip \
-                     deliverables/GPSFIX_FINAL_BUILD_OK.txt
-          git commit -m "Build final Botón Vida GPS fix APK" || true
+          git add server-src/NanoSmartServer_Windows_v3.6_Rendimiento_Receptor/server.js \
+                  android-src/source_package_v32/app/src/main/java/com/nanocomm/nanosmart/eventos/NanoSmartMessagingService.kt
+          git add -f deliverables/NanoSmart_Eventos_3.8.0_BotonVida_NOECHO-debug.apk \
+                     deliverables/NanoSmart_Android_BotonVida_NOECHO_Source.zip \
+                     deliverables/NanoSmart_Server_v3.6_BotonVida640_NOECHO_LISTO.zip \
+                     deliverables/NOECHO_BUILD_OK.txt
+          git commit -m "Exclude Botón Vida originator from own alarm" || true
           git push origin HEAD:boton-vida-640
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nanosmart-boton-vida-gpsfix-final
+          name: nanosmart-boton-vida-noecho
           path: |
-            deliverables/NanoSmart_Eventos_3.8.0_BotonVida_GPSFIX_FINAL-debug.apk
-            deliverables/NanoSmart_Android_BotonVida_GPSFIX_FINAL_Source.zip
-            deliverables/GPSFIX_FINAL_BUILD_OK.txt
+            deliverables/NanoSmart_Eventos_3.8.0_BotonVida_NOECHO-debug.apk
+            deliverables/NanoSmart_Android_BotonVida_NOECHO_Source.zip
+            deliverables/NanoSmart_Server_v3.6_BotonVida640_NOECHO_LISTO.zip
+            deliverables/NOECHO_BUILD_OK.txt
           if-no-files-found: error
           retention-days: 14
