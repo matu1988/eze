@@ -1,4 +1,4 @@
-name: Build Packet00 Fix
+name: Build Packet00 IP1 IP2 Fix
 
 on:
   push:
@@ -16,47 +16,44 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Patch firmware
+      - name: Build corrected firmware
         shell: python
         run: |
           from pathlib import Path
           import hashlib
 
           src = Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
-          dst = Path('MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          dst = Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin')
           data = bytearray(src.read_bytes())
 
-          offset = 0x10CAE
-          old = bytes.fromhex('45 F2 63 02')
-          new = bytes.fromhex('00 F0 89 F8')
+          patches = [
+              (0x10CAE, bytes.fromhex('45 F2 63 02'), bytes.fromhex('00 F0 89 F8')),
+              (0x10CB4, bytes.fromhex('04 D0'), bytes.fromhex('02 D1')),
+              (0x10CBA, bytes.fromhex('09 B9'), bytes.fromhex('09 B1')),
+          ]
 
           assert len(data) == 69076, f'Unexpected firmware size: {len(data)}'
-          if bytes(data[offset:offset+4]) == old:
-              data[offset:offset+4] = new
-          elif bytes(data[offset:offset+4]) != new:
-              raise AssertionError(f'Unexpected bytes at 0x{offset:X}: {data[offset:offset+4].hex(" ")}')
+          for offset, old, new in patches:
+              got = bytes(data[offset:offset+len(old)])
+              assert got == old, f'Unexpected bytes at 0x{offset:X}: {got.hex(" ")}'
+              data[offset:offset+len(new)] = new
 
           dst.write_bytes(data)
           check = dst.read_bytes()
           assert len(check) == 69076
-          assert check[offset:offset+4] == new
+          for offset, old, new in patches:
+              assert check[offset:offset+len(new)] == new
+
           print(f'Created: {dst}')
           print(f'Size: {len(check)}')
-          print(f'Offset 0x{offset:X}: {check[offset:offset+4].hex(" ")}')
           print(f'SHA256: {hashlib.sha256(check).hexdigest()}')
+          print('Packet00 selector: first pass IP2, duplicate pass IP1')
 
       - name: Upload corrected firmware
         uses: actions/upload-artifact@v4
         with:
-          name: MA_196_PACKET00_FIX
-          path: MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin
-          if-no-files-found: error
-
-      - name: Upload MA193 original
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_193_ORIGINAL
-          path: MA_193-GE-AR.bin
+          name: MA_196_PACKET00_IP1_IP2_FIX
+          path: MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin
           if-no-files-found: error
 
       - name: Commit corrected firmware
@@ -64,10 +61,10 @@ jobs:
         run: |
           git config user.name "packet00-fix-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin
+          git add MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin
           if git diff --cached --quiet; then
             echo "Firmware already present"
           else
-            git commit -m "Add corrected MA_196 Packet00 firmware"
+            git commit -m "Add MA196 Packet00 IP1 and IP2 fix"
             git push
           fi
