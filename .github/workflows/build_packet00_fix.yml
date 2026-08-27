@@ -1,4 +1,4 @@
-name: Disassemble Generic Event Entries
+name: Trace Generic Queue Return
 
 on:
   push:
@@ -13,21 +13,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump exact helper entries
+      - name: Dump queue helper
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
-          B=0x08000000
+          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes(); B=0x08000000
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          def dump(s,e,title):
-              print(f'\n===== {title} {B+s:08X}-{B+e:08X} =====')
+          for s,e,title in [(0x8254,0x82A8,'queue helper 0x8254'),(0x8230,0x82A8,'queue context')]:
+              print(f'\n===== {title} =====')
               for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          dump(0x8178,0x8250,'event builder 0x8178')
-          dump(0x82A8,0x8390,'generic injector 0x82A8')
-          dump(0x8CE0,0x8D58,'Packet00 0x8CE0')
           PY
