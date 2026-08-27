@@ -1,4 +1,4 @@
-name: Trace Packet00 Second Path
+name: Trace Generic Event Injector
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump live paths
+      - name: Dump event generation helpers
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -27,8 +27,8 @@ jobs:
               print(f'\n===== {title} {B+s:08X}-{B+e:08X} =====')
               for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          dump(0x3B80,0x3C30,'live loop / IMEI wrapper caller')
-          dump(0x9608,0x9840,'first Packet00 scheduler function')
-          dump(0x9DF0,0x9EE0,'second Packet00 scheduler path')
-          dump(0x9F60,0xA040,'neighbor periodic functions')
+          dump(0x8120,0x8350,'0x8178 / 0x82A8 event helpers')
+          dump(0x8BC0,0x8D60,'Packet00 generator details')
+          dump(0x3B10,0x3BA0,'main loop before generic 3031 injection')
+          dump(0x9E40,0x9F90,'second Packet00 path exact alignment')
           PY
