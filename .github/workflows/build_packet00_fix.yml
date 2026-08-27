@@ -1,4 +1,4 @@
-name: Build Independent TREG Timer V2
+name: Trace Live IMEI and Packet00 Paths
 
 on:
   push:
@@ -6,147 +6,86 @@ on:
       - '.github/workflows/build_packet00_fix.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Patch direct independent Packet00 timer
+      - name: Trace scheduler and live wrapper
         shell: bash
         run: |
-          python -m pip install --quiet capstone keystone-engine
+          python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib
-          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+          from capstone.arm import ARM_OP_IMM
+          import struct
 
           BASE=0x08000000
-          SRC=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin')
-          OUT=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE_V2.bin')
-          src=SRC.read_bytes()
-          assert len(src)==69096, len(src)
-          assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
-          d=bytearray(src)
+          FN='MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin'
+          d=Path(FN).read_bytes()
+          md=Cs(CS_ARCH_ARM, CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          md.detail=True
 
-          assert d[0x9714:0x9718]==bytes.fromhex('FF F7 E4 FA')
-          assert d[0x10CAA:0x10CAE]==bytes.fromhex('00 F0 93 F8')
-          assert d[0x10DCC:0x10DD2]==bytes.fromhex('43 F2 30 02 91 42')
+          def dump(start,end,title):
+              print(f'\n===== {title} {BASE+start:08X}-{BASE+end:08X} =====')
+              for i in md.disasm(d[start:end], BASE+start):
+                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
 
-          ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
-          wrapper_off=len(d)
-          wrapper_addr=BASE+wrapper_off
-          call,_=ks.asm(f'bl 0x{wrapper_addr:08x}', addr=BASE+0x9714, as_bytes=True)
-          call=bytes(call)
-          assert len(call)==4
-          d[0x9714:0x9718]=call
+          dump(0x9400,0x9840,'event scheduler full context')
+          dump(0x4F80,0x5120,'original routine near 0x506C')
+          dump(0x10B00,0x10C90,'appended wrappers and IMEI60')
 
-          # ME=1 only:
-          # 0x200043B4 marker
-          # 0x200043B8 independent TREG deadline
-          # 0x200043BC scratch deadline used only to force the original generator's
-          # internal timer check to an already-expired state.
-          # The independent deadline is checked DIRECTLY by 0x08003E0C.
-          # If the queue/channel is busy, deadline is NOT cleared, so generation
-          # is retried until Packet00 is actually accepted.
-          asm='''
-              push {r3,r4,r5,r6,r7,lr}
-              mov r4, r0
-              mov r5, r1
-              mov r6, r2
-              mov r7, r3
+          targets={
+              0x08010C16:'IMEI wrapper',
+              0x08010C22:'IMEI tick',
+              0x0800506C:'original 506C even',
+              0x0800506D:'original 506D thumb',
+              0x08008CE0:'Packet00 generator',
+              0x08007620:'TREG getter',
+              0x08003E0C:'deadline timer',
+          }
+          print('\n===== DIRECT CALL SCAN =====')
+          ins=list(md.disasm(d,BASE))
+          for i in ins:
+              if not i.mnemonic.startswith('bl'):
+                  continue
+              if not i.operands or i.operands[0].type != ARM_OP_IMM:
+                  continue
+              t=i.operands[0].imm & 0xffffffff
+              # Capstone normalizes Thumb target to even address.
+              for wanted,name in targets.items():
+                  if (t & ~1)==(wanted & ~1):
+                      print(f'{i.address:08X}: {i.mnemonic} {i.op_str} -> {name} ({wanted:08X})')
 
-              bl 0x08010b3e
-              cmp r0, #1
-              bne original_mode
+          # Print context around every direct call to IMEI wrapper / Packet00 generator / 506C.
+          interesting=[]
+          for i in ins:
+              if not i.mnemonic.startswith('bl') or not i.operands or i.operands[0].type!=ARM_OP_IMM:
+                  continue
+              t=i.operands[0].imm & 0xffffffff
+              if any((t&~1)==(x&~1) for x in [0x08010C16,0x08010C22,0x0800506C,0x08008CE0]):
+                  interesting.append(i.address)
+          for a in interesting:
+              off=a-BASE
+              dump(max(0,off-40), min(len(d),off+48), f'call context around {a:08X}')
 
-              movw r2, #0x43b4
-              movt r2, #0x2000
-              ldr r1, [r2]
-              movw r0, #0x5354
-              movt r0, #0x3247
-              cmp r1, r0
-              beq state_ready
-              str r0, [r2]
-              movs r1, #0
-              str r1, [r2, #4]
-              str r1, [r2, #8]
+          print('\n===== LITERAL TABLE 0x10D40-0x10DC4 =====')
+          for off in range(0x10D40,0x10DC4,4):
+              if off+4<=len(d):
+                  v=struct.unpack_from('<I',d,off)[0]
+                  print(f'{BASE+off:08X}: {v:08X}')
 
-          state_ready:
-              movw r0, #0x43b8
-              movt r0, #0x2000
-              mov r1, r7
-              bl 0x08003e0c
-              cbz r0, done
-
-              movw r2, #0x43bc
-              movt r2, #0x2000
-              movs r1, #1
-              str r1, [r2]
-
-              mov r0, r4
-              mov r1, r5
-              movs r3, #0
-              bl 0x08008ce0
-              cbz r0, done
-
-              movw r2, #0x43b8
-              movt r2, #0x2000
-              movs r1, #0
-              str r1, [r2]
-              str r1, [r2, #4]
-              b done
-
-          original_mode:
-              movw r0, #0x43b4
-              movt r0, #0x2000
-              movs r1, #0
-              str r1, [r0]
-              str r1, [r0, #4]
-              str r1, [r0, #8]
-              mov r0, r4
-              mov r1, r5
-              mov r2, r6
-              mov r3, r7
-              bl 0x08008ce0
-
-          done:
-              pop {r3,r4,r5,r6,r7,pc}
-          '''
-          wrapper,_=ks.asm(asm, addr=wrapper_addr, as_bytes=True)
-          wrapper=bytes(wrapper)
-          d.extend(wrapper)
-          OUT.write_bytes(d)
-
-          diffs=[i for i,(a,b) in enumerate(zip(src,d)) if a!=b]
-          assert diffs==list(range(0x9714,0x9718)), diffs
-          assert d[0x10CAA:0x10CAE]==bytes.fromhex('00 F0 93 F8')
-          assert d[0x10DCC:0x10DD2]==bytes.fromhex('43 F2 30 02 91 42')
-
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          print('SOURCE_SIZE',len(src))
-          print('OUTPUT_SIZE',len(d))
-          print('HOOK',hex(BASE+0x9714),call.hex(' '),'WRAPPER',hex(wrapper_addr))
-          print('WRAPPER_SIZE',len(wrapper))
-          print('SHA256',hashlib.sha256(d).hexdigest())
-          print('DIFFS_IN_SOURCE_RANGE',[hex(x) for x in diffs])
-          print('--- independent wrapper V2 ---')
-          for i in md.disasm(wrapper,wrapper_addr):
-              print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('\n===== REFERENCES TO CUSTOM RAM =====')
+          for addr in range(0x20004390,0x200043C1,4):
+              raw=struct.pack('<I',addr)
+              ps=[]; p=0
+              while True:
+                  p=d.find(raw,p)
+                  if p<0: break
+                  ps.append(p); p+=1
+              if ps:
+                  print(hex(addr),[hex(x) for x in ps])
           PY
-      - name: Commit firmware
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE_V2.bin
-          git commit -m "Add direct independent TREG Packet00 V2" || true
-          git push
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_196_PACKET00_TREG_INDEPENDIENTE_V2
-          path: MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE_V2.bin
-          if-no-files-found: error
