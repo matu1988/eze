@@ -1,4 +1,4 @@
-name: Diagnose Packet00 Routing
+name: Diagnose Packet00 Compare Helper
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Disassemble routing hook
+      - name: Disassemble helper
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -24,20 +24,12 @@ jobs:
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
 
-          files = [
-              'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
-              'MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin',
-          ]
-          start = 0x10C70
-          end = 0x10D40
+          fn = 'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'
+          data = Path(fn).read_bytes()
           base_addr = 0x08000000
           md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
-          md.detail = True
-
-          for fn in files:
-              data = Path(fn).read_bytes()
-              print('\n====', fn, '====')
-              chunk = data[start:end]
-              for insn in md.disasm(chunk, base_addr + start):
+          for start,end in [(0x10D40,0x10E40),(0x10B20,0x10C00)]:
+              print(f'\n==== range 0x{start:X}-0x{end:X} ====')
+              for insn in md.disasm(data[start:end], base_addr + start):
                   print(f'{insn.address:08X}: {insn.bytes.hex(" "):12} {insn.mnemonic:8} {insn.op_str}')
           PY
