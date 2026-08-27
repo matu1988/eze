@@ -1,4 +1,4 @@
-name: Compare MA193 MA196 Hooks
+name: Trace Packet00 Duplicate State
 
 on:
   push:
@@ -16,7 +16,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compare hooks
+      - name: Trace appended state machine
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -26,60 +26,41 @@ jobs:
           import struct
 
           base=0x08000000
-          orig=Path('MA_193-GE-AR.bin').read_bytes()
-          mod=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
+          data=Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin').read_bytes()
           md=Cs(CS_ARCH_ARM, CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          md.detail=True
 
-          # Group changed bytes in original address range, allowing very small gaps to remain in one patch cluster.
-          diffs=[i for i in range(min(len(orig),len(mod))) if orig[i]!=mod[i]]
-          groups=[]
-          if diffs:
-              s=p=diffs[0]
-              for x in diffs[1:]:
-                  if x-p<=4:
-                      p=x
-                  else:
-                      groups.append((s,p+1)); s=p=x
-              groups.append((s,p+1))
-          print('Original size',len(orig),'Modified size',len(mod),'diff bytes',len(diffs),'groups',len(groups))
-          for gi,(s,e) in enumerate(groups):
-              print(f'\n===== DIFF GROUP {gi} 0x{s:X}-0x{e:X} len {e-s} =====')
-              print('ORIG:',orig[s:e].hex(' '))
-              print('MOD :',mod[s:e].hex(' '))
-              ws=max(0,(s-0x30)&~1); we=min(len(orig),e+0x50)
-              print('-- ORIG disasm --')
-              for insn in md.disasm(orig[ws:we],base+ws):
-                  mark='>>' if s<=insn.address-base<e else '  '
-                  print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
-              print('-- MOD disasm --')
-              for insn in md.disasm(mod[ws:we],base+ws):
-                  mark='>>' if s<=insn.address-base<e else '  '
-                  print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
-
-          # Manual 16-bit Thumb LDR literal refs to RAM TREG value 0x20003BFC literal pools.
-          target=0x20003BFC
-          raw=struct.pack('<I',target)
-          hits=[];p=0
-          while True:
-              i=orig.find(raw,p)
-              if i<0:break
-              hits.append(i);p=i+1
-          print('\nTREG RAM literal hits', [hex(h) for h in hits])
-          for h in hits:
-              refs=[]
-              for off in range(max(0,h-0x500)&~1,h,2):
-                  hw=struct.unpack_from('<H',orig,off)[0]
+          start=0x10B3E; end=0x10D40
+          print('=== APPENDED CODE ===')
+          insns=list(md.disasm(data[start:end],base+start))
+          for insn in insns:
+              extra=''
+              # annotate 16-bit literal LDRs
+              if len(insn.bytes)==2:
+                  hw=int.from_bytes(insn.bytes,'little')
                   if (hw & 0xF800)==0x4800:
-                      imm8=hw & 0xFF
-                      lit=(((base+off+4)&~3)+(imm8<<2))-base
-                      if lit==h:
-                          refs.append(off)
-              print('literal',hex(h),'16-bit LDR refs', [hex(r) for r in refs])
-              for r in refs:
-                  ws=max(0,(r-0x60)&~1); we=min(len(orig),r+0x80)
-                  for tag,data in [('ORIG',orig),('MOD',mod)]:
-                      print(f'-- {tag} around ref 0x{r:X} --')
-                      for insn in md.disasm(data[ws:we],base+ws):
-                          mark='>>' if r<=insn.address-base<r+2 else '  '
-                          print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
+                      imm=hw&0xFF
+                      lit=((insn.address+4)&~3)+(imm<<2)
+                      off=lit-base
+                      if 0<=off<=len(data)-4:
+                          val=struct.unpack_from('<I',data,off)[0]
+                          extra=f' ; [0x{lit:08X}] = 0x{val:08X}'
+              print(f'{insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}{extra}')
+
+          print('\n=== LITERAL POOL 0x10D40-END ===')
+          for off in range(0x10D40,len(data)-3,4):
+              v=struct.unpack_from('<I',data,off)[0]
+              if v!=0:
+                  kind=''
+                  if 0x08000000<=v<0x08100000: kind='FLASH'
+                  elif 0x20000000<=v<0x20010000: kind='RAM'
+                  print(f'0x{off:05X}: 0x{v:08X} {kind}')
+
+          print('\n=== HOOK CALLERS ===')
+          targets=range(0x8010B3E,0x8010D40,2)
+          # Scan all BL/B.W instructions via capstone from known code starts is hard; just report known hook sites and target disassembly.
+          for off in [0x3B0C,0x3BE8,0x7AFC,0x7D5C,0x7D60,0x7D78,0x9736,0x9740,0x977A,0x97C0,0xDC56]:
+              print(f'-- hook site 0x{off:X} --')
+              for insn in md.disasm(data[off:off+8],base+off):
+                  print(f'{insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
           PY
