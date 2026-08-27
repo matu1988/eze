@@ -46,6 +46,13 @@ jobs:
           print(f'Offset 0x{offset:X}: {check[offset:offset+4].hex(" ")}')
           print(f'SHA256: {hashlib.sha256(check).hexdigest()}')
 
+      - name: Upload corrected firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_196_PACKET00_FIX
+          path: MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin
+          if-no-files-found: error
+
       - name: Commit corrected firmware
         shell: bash
         run: |
