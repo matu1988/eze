@@ -1,4 +1,4 @@
-name: Build Packet00 Dual IP V2
+name: Diagnose TREG Packet00 Timer
 
 on:
   push:
@@ -7,72 +7,67 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Patch only Packet00 duplicate exclusion
-        shell: python
-        run: |
-          from pathlib import Path
-          import hashlib
-
-          src = Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
-          dst = Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin')
-          data = bytearray(src.read_bytes())
-
-          assert len(data) == 69076, f'Unexpected size: {len(data)}'
-
-          # Confirm the general destination selector is untouched/original.
-          assert bytes(data[0x10CAE:0x10CB2]) == bytes.fromhex('45 F2 63 02')
-          assert bytes(data[0x10CB4:0x10CB6]) == bytes.fromhex('04 D0')
-          assert bytes(data[0x10CBA:0x10CBC]) == bytes.fromhex('09 B9')
-
-          # Helper at 0x08010DC4 currently treats both 0x5063 and ASCII '00'
-          # as special, so '00' skips the duplicate/second-IP path.
-          # Keep the 0x5063 comparison and remove only the second comparison
-          # against 0x3030, preserving the Z flag from the first comparison.
-          offset = 0x10DCC
-          old = bytes.fromhex('43 F2 30 02 91 42')
-          new = bytes.fromhex('00 BF 00 BF 00 BF')
-          got = bytes(data[offset:offset+len(old)])
-          assert got == old, f'Unexpected bytes at 0x{offset:X}: {got.hex(" ")}'
-          data[offset:offset+len(new)] = new
-
-          dst.write_bytes(data)
-          check = dst.read_bytes()
-          assert len(check) == 69076
-          assert check[offset:offset+6] == new
-          assert check[0x10CAE:0x10CB2] == bytes.fromhex('45 F2 63 02')
-          assert check[0x10CB4:0x10CB6] == bytes.fromhex('04 D0')
-          assert check[0x10CBA:0x10CBC] == bytes.fromhex('09 B9')
-
-          print('Created:', dst)
-          print('Size:', len(check))
-          print('Patch 0x10DCC:', check[offset:offset+6].hex(' '))
-          print('SHA256:', hashlib.sha256(check).hexdigest())
-
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_196_PACKET00_IP1_IP2_FIX_V2
-          path: MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin
-          if-no-files-found: error
-
-      - name: Commit firmware
+      - name: Locate TREG and timer logic
         shell: bash
         run: |
-          git config user.name "packet00-fix-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin
-          if git diff --cached --quiet; then
-            echo "Firmware already present"
-          else
-            git commit -m "Add Packet00 IP1 IP2 fix v2"
-            git push
-          fi
+          python -m pip install --quiet capstone
+          python - <<'PY'
+          from pathlib import Path
+          from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+          import struct
+
+          files = [
+              'MA_193-GE-AR.bin',
+              'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
+              'MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin',
+          ]
+          base = 0x08000000
+          md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
+
+          for fn in files:
+              data = Path(fn).read_bytes()
+              print('\n================', fn, '================')
+              for needle in [b'TREG', b'00', b'EVENT', b'TIMER-IHM']:
+                  positions=[]
+                  p=0
+                  while True:
+                      i=data.find(needle,p)
+                      if i<0: break
+                      positions.append(i); p=i+1
+                  print(needle, [hex(x) for x in positions[:20]])
+
+              treg = data.find(b'TREG')
+              if treg >= 0:
+                  addr = base+treg
+                  ptr = struct.pack('<I', addr)
+                  refs=[]
+                  p=0
+                  while True:
+                      i=data.find(ptr,p)
+                      if i<0: break
+                      refs.append(i); p=i+1
+                  print('TREG addr', hex(addr), 'literal refs', [hex(x) for x in refs])
+                  for r in refs:
+                      s=max(0,r-0x100); e=min(len(data),r+0x80)
+                      print(f'-- disasm around literal ref offset 0x{r:X} --')
+                      for insn in md.disasm(data[s:e], base+s):
+                          if abs(insn.address-(base+r)) < 0x100:
+                              print(f'{insn.address:08X}: {insn.bytes.hex(" "):12} {insn.mnemonic:8} {insn.op_str}')
+
+              # Search common timer constants: 60s, 1min ticks, 20min, 24h in ms/sec.
+              vals=[60,60000,1200,1200000,86400,86400000]
+              for v in vals:
+                  raw=struct.pack('<I',v)
+                  hits=[i for i in range(len(data)-3) if data[i:i+4]==raw]
+                  if hits:
+                      print('const',v,'hits', [hex(x) for x in hits[:20]])
+          PY
