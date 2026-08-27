@@ -1,10 +1,9 @@
-name: Trace Packet00 Routing Hooks
+name: Trace IP Destination Wrappers
 
 on:
   push:
     paths:
       - '.github/workflows/build_packet00_fix.yml'
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,35 +13,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Disassemble routing hooks
-        shell: bash
+      - name: Trace wrappers
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          BASE=0x08000000
+          import struct
+          B=0x08000000
+          d=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          files={
-            'ORIG':Path('MA_193-GE-AR.bin').read_bytes(),
-            'MOD':Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes(),
-            'V2':Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin').read_bytes(),
-          }
-          regions=[
-            ('EVENT_CALLS',0x96E0,0x9810),
-            ('ORIG_7950',0x7948,0x79A0),
-            ('ORIG_8CE0',0x8CC0,0x8D30),
-            ('APPENDED_ROUTING',0x10C80,0x10E20),
-          ]
-          for name,s,e in regions:
-            print('\n===== '+name+' =====')
-            for tag,data in files.items():
-              if s>=len(data): continue
-              print('\n-- '+tag+' --')
-              for i in md.disasm(data[s:min(e,len(data))],BASE+s):
-                print(f'{i.address:08X}: {i.bytes.hex(" "):12} {i.mnemonic:8} {i.op_str}')
-          print('\n===== BYTE DIFF MOD vs V2 appended =====')
-          a=files['MOD']; b=files['V2']
-          for i in range(min(len(a),len(b))):
-            if a[i]!=b[i]: print(f'0x{i:05X}: {a[i]:02X}->{b[i]:02X}')
+          for s,e in [(0x10B20,0x10C30),(0x10C80,0x10D10)]:
+            print(f'\nREGION {B+s:08X}-{B+e:08X}')
+            for i in md.disasm(d[s:e],B+s):
+              print(f'{i.address:08X}: {i.bytes.hex(" "):12} {i.mnemonic:8} {i.op_str}')
+          print('\nLITERALS 10D40-10DC4')
+          for off in range(0x10D40,0x10DC4,4):
+            if off+4<=len(d): print(f'{B+off:08X}: {struct.unpack_from("<I",d,off)[0]:08X}')
           PY
