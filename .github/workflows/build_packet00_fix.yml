@@ -1,4 +1,4 @@
-name: Diagnose Packet00 Compare Helper
+name: Build Packet00 Dual IP V2
 
 on:
   push:
@@ -7,29 +7,72 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Disassemble helper
+      - name: Patch only Packet00 duplicate exclusion
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+
+          src = Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          dst = Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin')
+          data = bytearray(src.read_bytes())
+
+          assert len(data) == 69076, f'Unexpected size: {len(data)}'
+
+          # Confirm the general destination selector is untouched/original.
+          assert bytes(data[0x10CAE:0x10CB2]) == bytes.fromhex('45 F2 63 02')
+          assert bytes(data[0x10CB4:0x10CB6]) == bytes.fromhex('04 D0')
+          assert bytes(data[0x10CBA:0x10CBC]) == bytes.fromhex('09 B9')
+
+          # Helper at 0x08010DC4 currently treats both 0x5063 and ASCII '00'
+          # as special, so '00' skips the duplicate/second-IP path.
+          # Keep the 0x5063 comparison and remove only the second comparison
+          # against 0x3030, preserving the Z flag from the first comparison.
+          offset = 0x10DCC
+          old = bytes.fromhex('43 F2 30 02 91 42')
+          new = bytes.fromhex('00 BF 00 BF 00 BF')
+          got = bytes(data[offset:offset+len(old)])
+          assert got == old, f'Unexpected bytes at 0x{offset:X}: {got.hex(" ")}'
+          data[offset:offset+len(new)] = new
+
+          dst.write_bytes(data)
+          check = dst.read_bytes()
+          assert len(check) == 69076
+          assert check[offset:offset+6] == new
+          assert check[0x10CAE:0x10CB2] == bytes.fromhex('45 F2 63 02')
+          assert check[0x10CB4:0x10CB6] == bytes.fromhex('04 D0')
+          assert check[0x10CBA:0x10CBC] == bytes.fromhex('09 B9')
+
+          print('Created:', dst)
+          print('Size:', len(check))
+          print('Patch 0x10DCC:', check[offset:offset+6].hex(' '))
+          print('SHA256:', hashlib.sha256(check).hexdigest())
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_196_PACKET00_IP1_IP2_FIX_V2
+          path: MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin
+          if-no-files-found: error
+
+      - name: Commit firmware
         shell: bash
         run: |
-          python -m pip install --quiet capstone
-          python - <<'PY'
-          from pathlib import Path
-          from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-
-          fn = 'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'
-          data = Path(fn).read_bytes()
-          base_addr = 0x08000000
-          md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
-          for start,end in [(0x10D40,0x10E40),(0x10B20,0x10C00)]:
-              print(f'\n==== range 0x{start:X}-0x{end:X} ====')
-              for insn in md.disasm(data[start:end], base_addr + start):
-                  print(f'{insn.address:08X}: {insn.bytes.hex(" "):12} {insn.mnemonic:8} {insn.op_str}')
-          PY
+          git config user.name "packet00-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin
+          if git diff --cached --quiet; then
+            echo "Firmware already present"
+          else
+            git commit -m "Add Packet00 IP1 IP2 fix v2"
+            git push
+          fi
