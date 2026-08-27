@@ -1,4 +1,4 @@
-name: Verify Free RAM For TREG
+name: Build Independent TREG Timer
 
 on:
   push:
@@ -6,37 +6,135 @@ on:
       - '.github/workflows/build_packet00_fix.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify RAM neighborhood
+      - name: Patch independent Packet00 timer
+        shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine
           python - <<'PY'
           from pathlib import Path
+          import hashlib
+          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
-          import struct
-          B=0x08000000
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.detail=True
-          for fn in ['MA_193-GE-AR.bin','MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin']:
-              d=Path(fn).read_bytes()
-              print('\n###',fn)
-              for s,e in [(0xC4D0,0xC550),(0x10C20,min(len(d),0x10E20))]:
-                  if s>=len(d): continue
-                  print(f'-- {B+s:08X}-{B+e:08X}')
-                  for i in md.disasm(d[s:e],B+s):
-                      print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-              print('literal refs exact:')
-              for a in [0x200043A4,0x200043A8,0x200043AC,0x200043B0,0x200043B4,0x200043B8,0x200043BC]:
-                  raw=struct.pack('<I',a); ps=[]; p=0
-                  while True:
-                      p=d.find(raw,p)
-                      if p<0: break
-                      ps.append(p); p+=1
-                  print(hex(a),[hex(x) for x in ps])
+
+          BASE=0x08000000
+          SRC=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin')
+          OUT=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE.bin')
+          src=SRC.read_bytes()
+          assert len(src)==69096, len(src)
+          assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
+          d=bytearray(src)
+
+          # Original periodic Packet00 call at 0x08009714.
+          assert d[0x9714:0x9718]==bytes.fromhex('FF F7 E4 FA')
+          # Preserve the previous Packet00-IP1 routing patch.
+          assert d[0x10CAA:0x10CAE]==bytes.fromhex('00 F0 93 F8')
+          assert d[0x10DCC:0x10DD2]==bytes.fromhex('43 F2 30 02 91 42')
+
+          ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          wrapper_off=len(d)
+          wrapper_addr=BASE+wrapper_off
+
+          # Hook ONLY the TREG Packet00 generator call.
+          call,_=ks.asm(f'bl 0x{wrapper_addr:08x}', addr=BASE+0x9714, as_bytes=True)
+          call=bytes(call)
+          assert len(call)==4
+          d[0x9714:0x9718]=call
+
+          # Custom state lives immediately after the original BSS/custom state area:
+          # 0x200043B4 = marker, 0x200043B8 = independent TREG deadline.
+          # The original BSS ends at 0x200043A4; existing custom state uses A4-B0.
+          asm='''
+              push {r3,r4,r5,r6,r7,lr}
+              mov r4, r0
+              mov r5, r1
+              mov r6, r2
+              mov r7, r3
+
+              bl 0x08010b3e
+              cmp r0, #1
+              bne original_mode
+
+              movw r2, #0x43b4
+              movt r2, #0x2000
+              ldr r1, [r2]
+              movw r0, #0x5354
+              movt r0, #0x5445
+              cmp r1, r0
+              beq state_ready
+              str r0, [r2]
+              movs r1, #0
+              str r1, [r2, #4]
+
+          state_ready:
+              mov r0, r4
+              mov r1, r5
+              adds r2, #4
+              mov r3, r7
+              bl 0x08008ce0
+              cbz r0, done
+
+              movw r2, #0x43b8
+              movt r2, #0x2000
+              movs r1, #0
+              str r1, [r2]
+              b done
+
+          original_mode:
+              movw r0, #0x43b4
+              movt r0, #0x2000
+              movs r1, #0
+              str r1, [r0]
+              str r1, [r0, #4]
+              mov r0, r4
+              mov r1, r5
+              mov r2, r6
+              mov r3, r7
+              bl 0x08008ce0
+
+          done:
+              pop {r3,r4,r5,r6,r7,pc}
+          '''
+          wrapper,_=ks.asm(asm, addr=wrapper_addr, as_bytes=True)
+          wrapper=bytes(wrapper)
+          d.extend(wrapper)
+          OUT.write_bytes(d)
+
+          # Validate that the only change inside the previous firmware is the 4-byte hook.
+          diffs=[i for i,(a,b) in enumerate(zip(src,d)) if a!=b]
+          assert diffs==list(range(0x9714,0x9718)), diffs
+
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          print('SOURCE_SIZE',len(src))
+          print('OUTPUT_SIZE',len(d))
+          print('HOOK',hex(BASE+0x9714),call.hex(' '),'WRAPPER',hex(wrapper_addr))
+          print('WRAPPER_SIZE',len(wrapper))
+          print('SHA256',hashlib.sha256(d).hexdigest())
+          print('DIFFS_IN_SOURCE_RANGE',[hex(x) for x in diffs])
+          print('--- scheduler ---')
+          for i in md.disasm(bytes(d[0x9706:0x9720]),BASE+0x9706):
+              print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('--- independent wrapper ---')
+          for i in md.disasm(wrapper,wrapper_addr):
+              print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
           PY
+      - name: Commit firmware
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE.bin
+          git commit -m "Add independent TREG Packet00 timer firmware" || true
+          git push
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_196_PACKET00_TREG_INDEPENDIENTE
+          path: MA_196-GE-AR_PACKET00_SOLO_IP1_TREG_INDEPENDIENTE.bin
+          if-no-files-found: error
