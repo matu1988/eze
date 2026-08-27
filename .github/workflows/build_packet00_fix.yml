@@ -1,4 +1,4 @@
-name: Build Packet00 Dual IP TREG V3
+name: Trace Real TREG Scheduler
 
 on:
   push:
@@ -7,153 +7,159 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build V3
+      - name: Trace TREG and Packet00 scheduler
         shell: bash
         run: |
-          python -m pip install --quiet keystone-engine capstone
+          python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib
-          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
+          import struct, re
 
-          src = Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin')
-          dst = Path('MA_196-GE-AR_PACKET00_IP1_IP2_TREG_FIX_V3.bin')
-          data = bytearray(src.read_bytes())
+          base=0x08000000
+          files=[
+            ('ORIG','MA_193-GE-AR.bin'),
+            ('MOD','MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'),
+            ('V2','MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin'),
+            ('V3','MA_196-GE-AR_PACKET00_IP1_IP2_TREG_FIX_V3.bin'),
+          ]
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.detail=True
 
-          expected_sha = '358b7c613432abe4e10384921b2ff90546b655f8ac0f140a818861facfc2374a'
-          got_sha = hashlib.sha256(data).hexdigest()
-          assert got_sha == expected_sha, f'Unexpected V2 SHA256: {got_sha}'
-          assert len(data) == 69076
-          assert len(data) == 0x10DD4
-          assert bytes(data[0x97C0:0x97C4]) == bytes.fromhex('07 F0 84 FA')
+          def one(data,off):
+              xs=list(md.disasm(data[off:off+4],base+off,count=1))
+              return xs[0] if xs else None
 
-          base = 0x08000000
-          helper_off = len(data)
-          helper_addr = base + helper_off
+          def literal_target(insn):
+              if insn.mnemonic.startswith('ldr') and insn.operands:
+                  for op in insn.operands:
+                      if op.type==ARM_OP_MEM and op.mem.base==ARM_REG_PC:
+                          # Thumb literal base is Align(PC+4,4)
+                          return ((insn.address+4)&~3) + op.mem.disp
+              return None
 
-          asm = r'''
-              push {r0, lr}
-              bl 0x08010B3E
-              mov ip, r0
-              pop.w {r0, lr}
-              cmp.w ip, #1
-              bne cleanup
+          def dump(data,start,end,title):
+              print(f'\n===== {title} 0x{start:X}-0x{end:X} =====')
+              for i in md.disasm(data[start:end],base+start):
+                  extra=''
+                  t=literal_target(i)
+                  if t is not None:
+                      o=t-base
+                      if 0<=o<=len(data)-4:
+                          v=struct.unpack_from('<I',data,o)[0]
+                          extra=f' ; literal@0x{o:X}=0x{v:08X}'
+                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}{extra}')
 
-              ldrh r1, [r4, #0x1a]
-              movw r2, #0x5063
-              cmp r1, r2
-              beq cleanup
+          target=0x20003BFC
+          neigh=set(range(target-0x20,target+0x24,4))
 
-              movw r2, #0x43ac
-              movt r2, #0x2000
-              ldr r3, [r2]
-              cbnz r3, second_pass
+          for tag,fn in files:
+              data=Path(fn).read_bytes()
+              print(f'\n\n################ {tag} {fn} size={len(data)} ################')
+              # strings around TREG / test config
+              for needle in [b'TREG',b'TEST',b'REG',b'00']:
+                  hits=[]; p=0
+                  while True:
+                      x=data.find(needle,p)
+                      if x<0: break
+                      hits.append(x); p=x+1
+                  print(needle, [hex(x) for x in hits[:40]])
+                  for x in hits[:8]:
+                      s=max(0,x-48); e=min(len(data),x+96)
+                      printable=''.join(chr(c) if 32<=c<127 else '.' for c in data[s:e])
+                      print(f' string ctx 0x{x:X}: {printable}')
 
-              movs r3, #1
-              str r3, [r2]
-              movw r2, #0x3ce4
-              movt r2, #0x2000
-              strb r3, [r2]
-              movw r2, #0x3cf0
-              movt r2, #0x2000
-              movs r3, #0
-              strb r3, [r2]
-              pop {r3, r4, r5, r6, r7, pc}
+              # literal occurrences holding RAM addresses around TREG
+              lit_occ=[]
+              for addr in sorted(neigh):
+                  raw=struct.pack('<I',addr); p=0
+                  while True:
+                      x=data.find(raw,p)
+                      if x<0: break
+                      lit_occ.append((x,addr)); p=x+1
+              print('RAM literal occurrences near TREG:', [(hex(o),hex(a)) for o,a in lit_occ])
 
-          second_pass:
-              movs r3, #0
-              str r3, [r2]
-              movw r2, #0x3030
-              cmp r1, r2
-              bne resume
-              str r3, [r0, #0x48]
+              refs=[]
+              litset={o:(a) for o,a in lit_occ}
+              for off in range(0,len(data)-4,2):
+                  i=one(data,off)
+                  if not i: continue
+                  t=literal_target(i)
+                  if t is None: continue
+                  lo=t-base
+                  if lo in litset:
+                      refs.append((off,lo,litset[lo],i))
+              print('PC-relative refs to TREG-near literals:')
+              for off,lo,a,i in refs:
+                  print(f' ref 0x{off:X}: {i.mnemonic} {i.op_str} -> literal 0x{lo:X} = 0x{a:08X}')
+                  dump(data,max(0,(off-0x60)&~1),min(len(data),(off+0xA0)&~1),f'{tag} around ref 0x{off:X}')
 
-          resume:
-              ldrb r3, [r0, #0x18]
-              adds r4, #0x16
-              movw r2, #0x97c5
-              movt r2, #0x0800
-              bx r2
+              # Search for immediate 60/0x3c and multiplications near each TREG ref in raw disassembly window
+              print('\nCandidate scheduler windows containing #0x3c / mul near TREG refs')
+              for off,_,_,_ in refs:
+                  ws=max(0,(off-0x120)&~1); we=min(len(data),(off+0x180)&~1)
+                  ins=list(md.disasm(data[ws:we],base+ws))
+                  interesting=[i for i in ins if '#0x3c' in i.op_str or i.mnemonic.startswith('mul') or i.mnemonic in ('udiv','sdiv')]
+                  if interesting:
+                      print(' window for ref',hex(off))
+                      for i in interesting:
+                          print(f'  {i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
 
-          cleanup:
-              movw r2, #0x43ac
-              movt r2, #0x2000
-              movs r1, #0
-              str r1, [r2]
-              ldrb r3, [r0, #0x18]
-              adds r4, #0x16
-              movw r2, #0x97c5
-              movt r2, #0x0800
-              bx r2
-          '''
+          # Compare original and V2 around every ORIG TREG ref byte-for-byte
+          orig=Path(files[0][1]).read_bytes(); v2=Path(files[2][1]).read_bytes()
+          print('\n\n===== ORIG vs V2 around all ORIG TREG references =====')
+          # recompute refs on orig
+          lit_occ=[]
+          for addr in sorted(neigh):
+              raw=struct.pack('<I',addr); p=0
+              while True:
+                  x=orig.find(raw,p)
+                  if x<0: break
+                  lit_occ.append((x,addr)); p=x+1
+          litset={o:a for o,a in lit_occ}
+          refs=[]
+          for off in range(0,len(orig)-4,2):
+              i=one(orig,off)
+              if not i: continue
+              t=literal_target(i)
+              if t is not None and (t-base) in litset:
+                  refs.append(off)
+          for off in refs:
+              s=max(0,off-0x100); e=min(len(orig),off+0x180)
+              ds=[i for i in range(s,e) if i<len(v2) and orig[i]!=v2[i]]
+              print(f'ref 0x{off:X}: changed bytes in ±window={len(ds)} first={[hex(x) for x in ds[:30]]}')
 
-          ks = Ks(KS_ARCH_ARM, KS_MODE_THUMB | KS_MODE_LITTLE_ENDIAN)
-          enc, _ = ks.asm(asm, addr=helper_addr)
-          helper = bytes(enc)
-          assert helper, 'Helper assembly empty'
-
-          # Redirect the existing 0x97C0 hook to the new V3 helper.
-          bl_enc, _ = ks.asm(f'bl 0x{helper_addr:08X}', addr=base + 0x97C0)
-          bl = bytes(bl_enc)
-          assert len(bl) == 4, bl.hex()
-          data[0x97C0:0x97C4] = bl
-
-          # Append the new helper. All V2 bytes other than the BL target remain unchanged.
-          data.extend(helper)
-          dst.write_bytes(data)
-
-          # Integrity checks.
-          check = dst.read_bytes()
-          assert check[:0x97C0] == src.read_bytes()[:0x97C0]
-          assert check[0x97C4:0x10DD4] == src.read_bytes()[0x97C4:0x10DD4]
-          assert check[0x10DD4:] == helper
-
-          md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
-          site = list(md.disasm(check[0x97C0:0x97C4], base+0x97C0))
-          assert len(site) == 1 and site[0].mnemonic == 'bl'
-          assert int(site[0].op_str.lstrip('#'), 16) == helper_addr
-
-          # Confirm the V3 helper contains the TREG rearm store at [r0,#0x48].
-          dis = list(md.disasm(helper, helper_addr))
-          assert any(i.mnemonic == 'str' and '[r0, #0x48]' in i.op_str for i in dis)
-
-          print('Created:', dst)
-          print('Base V2 SHA256:', expected_sha)
-          print(f'New helper: 0x{helper_addr:08X}, {len(helper)} bytes')
-          print('Patched 0x080097C0:', bl.hex(' '), site[0].mnemonic, site[0].op_str)
-          print('New size:', len(check))
-          print('V3 SHA256:', hashlib.sha256(check).hexdigest())
-          print('\nV3 helper disassembly:')
-          for i in dis:
-              print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          # Locate exact code references to ASCII TREG string literal where possible.
+          for tag,fn in files[:3]:
+              data=Path(fn).read_bytes()
+              print(f'\n===== {tag} code refs to TREG string =====')
+              p=0; string_hits=[]
+              while True:
+                  x=data.find(b'TREG',p)
+                  if x<0: break
+                  string_hits.append(x); p=x+1
+              for sh in string_hits:
+                  # find literals pointing at flash address sh
+                  raw=struct.pack('<I',base+sh)
+                  lps=[]; q=0
+                  while True:
+                      z=data.find(raw,q)
+                      if z<0: break
+                      lps.append(z); q=z+1
+                  print('TREG str',hex(sh),'ptr literals',[hex(z) for z in lps])
+                  for z in lps:
+                      for off in range(max(0,z-0x1000)&~1,z,2):
+                          i=one(data,off)
+                          if i and literal_target(i)==base+z:
+                              print(' ref',hex(off),i.mnemonic,i.op_str)
+                              dump(data,max(0,off-0x80),min(len(data),off+0x120),f'{tag} TREG parser ref 0x{off:X}')
           PY
-
-      - name: Upload V3
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_196_PACKET00_IP1_IP2_TREG_FIX_V3
-          path: MA_196-GE-AR_PACKET00_IP1_IP2_TREG_FIX_V3.bin
-          if-no-files-found: error
-
-      - name: Commit V3
-        shell: bash
-        run: |
-          git config user.name "packet00-fix-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add MA_196-GE-AR_PACKET00_IP1_IP2_TREG_FIX_V3.bin
-          if git diff --cached --quiet; then
-            echo "V3 already present"
-          else
-            git commit -m "Add Packet00 dual IP TREG rearm V3"
-            git push
-          fi
