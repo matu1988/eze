@@ -1,4 +1,4 @@
-name: Diagnose TREG Packet00 Timer
+name: Trace TREG Timer References
 
 on:
   push:
@@ -16,58 +16,69 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Locate TREG and timer logic
+      - name: Trace timer references
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
           import struct
 
+          base = 0x08000000
+          target = 0x20003BFC
           files = [
               'MA_193-GE-AR.bin',
               'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
               'MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin',
           ]
-          base = 0x08000000
           md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
+          md.detail = True
+
+          def disasm_window(data, center, before=0x80, after=0x80):
+              s=max(0, center-before); e=min(len(data), center+after)
+              # align halfword
+              s &= ~1
+              for insn in md.disasm(data[s:e], base+s):
+                  mark='>>' if center <= insn.address-base < center+4 else '  '
+                  print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
 
           for fn in files:
-              data = Path(fn).read_bytes()
-              print('\n================', fn, '================')
-              for needle in [b'TREG', b'00', b'EVENT', b'TIMER-IHM']:
-                  positions=[]
-                  p=0
-                  while True:
-                      i=data.find(needle,p)
-                      if i<0: break
-                      positions.append(i); p=i+1
-                  print(needle, [hex(x) for x in positions[:20]])
+              data=Path(fn).read_bytes()
+              print('\n================',fn,'================')
+              raw=struct.pack('<I',target)
+              hits=[]; p=0
+              while True:
+                  i=data.find(raw,p)
+                  if i<0: break
+                  hits.append(i); p=i+1
+              print('literal target hits:', [hex(x) for x in hits])
+              for h in hits:
+                  print(f'\n-- literal 0x{h:X} = {target:08X}; candidate LDR refs --')
+                  # Find PC-relative LDR instructions across nearby code whose literal address equals h.
+                  candidates=[]
+                  s=max(0,h-0x400); e=min(len(data),h+0x20)
+                  s &= ~1
+                  for insn in md.disasm(data[s:e],base+s):
+                      if insn.mnemonic.startswith('ldr') and insn.operands:
+                          for op in insn.operands:
+                              if op.type==ARM_OP_MEM and op.mem.base==ARM_REG_PC:
+                                  # Thumb literal base is Align(PC+4,4)
+                                  lit=((insn.address+4)&~3)+op.mem.disp
+                                  if lit==base+h:
+                                      candidates.append(insn.address-base)
+                  print('candidate instructions:', [hex(x) for x in candidates])
+                  for c in candidates:
+                      print(f'\nwindow around ref 0x{c:X}:')
+                      disasm_window(data,c,0x70,0x90)
 
-              treg = data.find(b'TREG')
-              if treg >= 0:
-                  addr = base+treg
-                  ptr = struct.pack('<I', addr)
-                  refs=[]
-                  p=0
-                  while True:
-                      i=data.find(ptr,p)
-                      if i<0: break
-                      refs.append(i); p=i+1
-                  print('TREG addr', hex(addr), 'literal refs', [hex(x) for x in refs])
-                  for r in refs:
-                      s=max(0,r-0x100); e=min(len(data),r+0x80)
-                      print(f'-- disasm around literal ref offset 0x{r:X} --')
-                      for insn in md.disasm(data[s:e], base+s):
-                          if abs(insn.address-(base+r)) < 0x100:
-                              print(f'{insn.address:08X}: {insn.bytes.hex(" "):12} {insn.mnemonic:8} {insn.op_str}')
-
-              # Search common timer constants: 60s, 1min ticks, 20min, 24h in ms/sec.
-              vals=[60,60000,1200,1200000,86400,86400000]
-              for v in vals:
-                  raw=struct.pack('<I',v)
-                  hits=[i for i in range(len(data)-3) if data[i:i+4]==raw]
-                  if hits:
-                      print('const',v,'hits', [hex(x) for x in hits[:20]])
+              # Find all 32-bit literal values close to timer target to reveal adjacent globals.
+              print('\n32-bit RAM literals in appended block 0x10A00-end:')
+              vals=[]
+              for off in range(0x10A00,len(data)-3,4):
+                  v=struct.unpack_from('<I',data,off)[0]
+                  if 0x20000000 <= v < 0x20010000:
+                      vals.append((off,v))
+              print([(hex(o),hex(v)) for o,v in vals])
           PY
