@@ -1,4 +1,4 @@
-name: Compact Trace Periodic Test Scheduler
+name: Trace Packet00 Routing Hooks
 
 on:
   push:
@@ -13,131 +13,36 @@ jobs:
   diagnose:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Compact scheduler trace
+      - uses: actions/checkout@v4
+      - name: Disassemble routing hooks
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
-          import struct
-
           BASE=0x08000000
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.detail=True
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
           files={
             'ORIG':Path('MA_193-GE-AR.bin').read_bytes(),
             'MOD':Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes(),
             'V2':Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin').read_bytes(),
           }
-
-          def one(data,off):
-              xs=list(md.disasm(data[off:off+4],BASE+off,count=1))
-              return xs[0] if xs else None
-
-          def target_of_branch(i):
-              if i and i.mnemonic in ('bl','b','b.w') and i.op_str.startswith('#0x'):
-                  try:return int(i.op_str[1:],16)
-                  except:return None
-              return None
-
-          def lit_info(data,i):
-              if not i or not i.mnemonic.startswith('ldr'): return None
-              for op in i.operands:
-                  if op.type==ARM_OP_MEM and op.mem.base==ARM_REG_PC:
-                      addr=((i.address+4)&~3)+op.mem.disp
-                      off=addr-BASE
-                      if 0<=off<=len(data)-4:
-                          return off,struct.unpack_from('<I',data,off)[0]
-              return None
-
-          def xrefs(data,target):
-              out=[]
-              for off in range(0,len(data)-4,2):
-                  i=one(data,off)
-                  if target_of_branch(i)==target and i.mnemonic=='bl': out.append(off)
-              return out
-
-          def dump_context(tag,data,off,before=0x36,after=0x60):
-              s=max(0,(off-before)&~1); e=min(len(data),(off+after)&~1)
-              print(f'-- {tag} context xref 0x{off:X} --')
-              # resync by trying each halfword and only print instruction stream beginning at likely function neighborhood
-              # For compactness, disassemble from s; if no output, advance 2 bytes.
-              chosen=[]
-              for shift in range(0,10,2):
-                  cand=list(md.disasm(data[s+shift:e],BASE+s+shift))
-                  if any(i.address==BASE+off for i in cand):
-                      chosen=cand; break
-              if not chosen:
-                  chosen=list(md.disasm(data[s:e],BASE+s))
-              for i in chosen:
-                  mark='>>' if i.address==BASE+off else '  '
-                  extra=''
-                  li=lit_info(data,i)
-                  if li:
-                      lo,val=li
-                      extra=f' ; LIT[0x{lo:X}]=0x{val:08X}'
-                  print(f'{mark}{i.address:08X}: {i.bytes.hex(" "):13} {i.mnemonic:8} {i.op_str}{extra}')
-
-          # 1) All direct callers of the generic deadline function and Packet00 generator.
-          for target,name in [(0x08003E0C,'DEADLINE_3E0C'),(0x08008CE0,'PACKET00_GEN_8CE0')]:
-              print(f'\n===== XREFS {name} =====')
-              for tag,data in files.items():
-                  xs=xrefs(data,target)
-                  print(tag,[hex(x) for x in xs])
-                  for x in xs:
-                      dump_context(tag,data,x)
-
-          # 2) Locate exact 0x20003BFC literal and all valid PC-relative references to it.
-          print('\n===== TREG CONFIG RAM 0x20003BFC =====')
-          treg=0x20003BFC
-          for tag,data in files.items():
-              raw=struct.pack('<I',treg); pools=[]; p=0
-              while True:
-                  p=data.find(raw,p)
-                  if p<0:break
-                  pools.append(p); p+=1
-              refs=[]
-              for off in range(0,len(data)-4,2):
-                  i=one(data,off); li=lit_info(data,i)
-                  if li and li[0] in pools and li[1]==treg: refs.append(off)
-              print(tag,'literal_pools',[hex(x) for x in pools],'code_refs',[hex(x) for x in refs])
-              for x in refs: dump_context(tag,data,x,0x40,0x80)
-
-          # 3) Compare ORIG vs V2 around scheduler and generator xrefs.
-          print('\n===== ORIG VS V2 XREF WINDOWS =====')
-          orig=files['ORIG']; v2=files['V2']
-          interesting=sorted(set(xrefs(orig,0x08003E0C)+xrefs(orig,0x08008CE0)))
-          for off in interesting:
-              s=max(0,off-0x80); e=min(len(orig),off+0xC0,len(v2))
-              dif=[x for x in range(s,e) if orig[x]!=v2[x]]
-              print(f'window@0x{off:X}: diff_count={len(dif)} first={[hex(x) for x in dif[:24]]}')
-
-          # 4) Search all obvious zero stores in functions around deadline callers and report preceding literal RAM loads.
-          print('\n===== ZERO STORES NEAR DEADLINE CALLERS (ORIG) =====')
-          for call in xrefs(orig,0x08003E0C):
-              s=max(0,call-0x100); e=min(len(orig),call+0x180)
-              ins=[]
-              for shift in range(0,10,2):
-                  cand=list(md.disasm(orig[s+shift:e],BASE+s+shift))
-                  if any(i.address==BASE+call for i in cand): ins=cand; break
-              for idx,i in enumerate(ins):
-                  if i.mnemonic.startswith('str'):
-                      # print stores with a nearby movs reg,#0 in previous 4 insns
-                      prev=ins[max(0,idx-4):idx]
-                      if any(p.mnemonic in ('movs','mov') and p.op_str.endswith('#0') for p in prev):
-                          print(f'caller 0x{call:X}: {i.address:08X} {i.mnemonic} {i.op_str}')
-                          for p in prev:
-                              li=lit_info(orig,p); extra=f' LIT=0x{li[1]:08X}' if li else ''
-                              print(f'   prev {p.address:08X} {p.mnemonic} {p.op_str}{extra}')
-
-          # 5) Print differences specifically in known modified event state machine around 0x9700.
-          print('\n===== EVENT STATE MACHINE DIFF SUMMARY 0x9700-0x9810 =====')
-          for tag in ('MOD','V2'):
-              data=files[tag]
-              dif=[x for x in range(0x9700,0x9810) if orig[x]!=data[x]]
-              print(tag,'diffs',[hex(x) for x in dif])
+          regions=[
+            ('EVENT_CALLS',0x96E0,0x9810),
+            ('ORIG_7950',0x7948,0x79A0),
+            ('ORIG_8CE0',0x8CC0,0x8D30),
+            ('APPENDED_ROUTING',0x10C80,0x10E20),
+          ]
+          for name,s,e in regions:
+            print('\n===== '+name+' =====')
+            for tag,data in files.items():
+              if s>=len(data): continue
+              print('\n-- '+tag+' --')
+              for i in md.disasm(data[s:min(e,len(data))],BASE+s):
+                print(f'{i.address:08X}: {i.bytes.hex(" "):12} {i.mnemonic:8} {i.op_str}')
+          print('\n===== BYTE DIFF MOD vs V2 appended =====')
+          a=files['MOD']; b=files['V2']
+          for i in range(min(len(a),len(b))):
+            if a[i]!=b[i]: print(f'0x{i:05X}: {a[i]:02X}->{b[i]:02X}')
           PY
