@@ -1,0 +1,60 @@
+name: Build Packet00 Fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build_packet00_fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch firmware
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+
+          src = Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          dst = Path('MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          data = bytearray(src.read_bytes())
+
+          offset = 0x10CAE
+          old = bytes.fromhex('45 F2 63 02')
+          new = bytes.fromhex('00 F0 89 F8')
+
+          assert len(data) == 69076, f'Unexpected firmware size: {len(data)}'
+          assert bytes(data[offset:offset+4]) == old, (
+              f'Unexpected bytes at 0x{offset:X}: {data[offset:offset+4].hex(" ")}'
+          )
+
+          data[offset:offset+4] = new
+          dst.write_bytes(data)
+
+          check = dst.read_bytes()
+          assert len(check) == 69076
+          assert check[offset:offset+4] == new
+          print(f'Created: {dst}')
+          print(f'Size: {len(check)}')
+          print(f'Offset 0x{offset:X}: {check[offset:offset+4].hex(" ")}')
+          print(f'SHA256: {hashlib.sha256(check).hexdigest()}')
+
+      - name: Commit corrected firmware
+        shell: bash
+        run: |
+          git config user.name "packet00-fix-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin
+          if git diff --cached --quiet; then
+            echo "Firmware already present"
+          else
+            git commit -m "Add corrected MA_196 Packet00 firmware"
+            git push
+          fi
