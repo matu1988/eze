@@ -31,13 +31,12 @@ jobs:
           new = bytes.fromhex('00 F0 89 F8')
 
           assert len(data) == 69076, f'Unexpected firmware size: {len(data)}'
-          assert bytes(data[offset:offset+4]) == old, (
-              f'Unexpected bytes at 0x{offset:X}: {data[offset:offset+4].hex(" ")}'
-          )
+          if bytes(data[offset:offset+4]) == old:
+              data[offset:offset+4] = new
+          elif bytes(data[offset:offset+4]) != new:
+              raise AssertionError(f'Unexpected bytes at 0x{offset:X}: {data[offset:offset+4].hex(" ")}')
 
-          data[offset:offset+4] = new
           dst.write_bytes(data)
-
           check = dst.read_bytes()
           assert len(check) == 69076
           assert check[offset:offset+4] == new
@@ -51,6 +50,13 @@ jobs:
         with:
           name: MA_196_PACKET00_FIX
           path: MA_196-GE-AR_ME1_PACKET00_FIX_AB_IMEI60S_IP2_RESET24H_TEST.bin
+          if-no-files-found: error
+
+      - name: Upload MA193 original
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_193_ORIGINAL
+          path: MA_193-GE-AR.bin
           if-no-files-found: error
 
       - name: Commit corrected firmware
