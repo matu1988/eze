@@ -32,11 +32,8 @@ jobs:
           assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
           d=bytearray(src)
 
-          # The live-loop wrapper at 0x08010C16 is called from 0x08003BE8 every main-loop pass.
-          # Its existing BL at 0x08010C1C calls only the IMEI60 tick.
-          assert d[0x10C1C:0x10C20] == bytes.fromhex('00 F0 01 F8')
-
-          # Preserve the proven Packet00 IP1-only routing changes.
+          original_hook=bytes(d[0x10C1C:0x10C20])
+          assert original_hook == bytes.fromhex('00 F0 01 F8')
           assert d[0x10CAA:0x10CAE] == bytes.fromhex('00 F0 93 F8')
           assert d[0x10DCC:0x10DD2] == bytes.fromhex('43 F2 30 02 91 42')
 
@@ -44,31 +41,14 @@ jobs:
           tick_off=len(d)
           tick_addr=BASE+tick_off
 
-          # Replace only the IMEI-tick BL with a BL to a combined live-loop tick.
           hook,_=ks.asm(f'bl 0x{tick_addr:08x}', addr=BASE+0x10C1C, as_bytes=True)
           hook=bytes(hook)
-          assert len(hook)==4
+          assert len(hook)==4 and hook != original_hook
           d[0x10C1C:0x10C20]=hook
 
-          # Custom state:
-          #   0x200043B4 marker
-          #   0x200043B8 Packet00 independent deadline
-          # Both are beyond the existing custom state (A4-B0) and were verified unused.
-          #
-          # Flow, ME=1 only:
-          #   1) run the original IMEI60 tick unchanged
-          #   2) get TREG seconds
-          #   3) check independent deadline from the proven live main loop
-          #   4) when expired, inject event 0x3030 with (arg2=0,arg3=1)
-          #      through 0x080082A8, which uses the SAME 0x08008178 event builder
-          #      as the original Packet00 generator
-          #   5) clear/rearm deadline ONLY after queue helper reports success;
-          #      if busy, keep expired deadline and retry next ~100 ms loop
           asm='''
               push {r4,lr}
-
               bl 0x08010c22
-
               bl 0x08010b3e
               cmp r0, #1
               bne disable_test
@@ -123,14 +103,16 @@ jobs:
           OUT.write_bytes(d)
 
           diffs=[i for i,(a,b) in enumerate(zip(src,d)) if a!=b]
-          assert diffs == list(range(0x10C1C,0x10C20)), [hex(x) for x in diffs]
+          assert diffs and all(0x10C1C <= x < 0x10C20 for x in diffs), [hex(x) for x in diffs]
+          assert bytes(d[0x10C1C:0x10C20]) == hook
           assert d[0x10CAA:0x10CAE] == bytes.fromhex('00 F0 93 F8')
           assert d[0x10DCC:0x10DD2] == bytes.fromhex('43 F2 30 02 91 42')
 
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
           print('SOURCE_SIZE',len(src))
           print('OUTPUT_SIZE',len(d))
-          print('HOOK_ADDR',hex(BASE+0x10C1C),'HOOK',hook.hex(' '),'TICK_ADDR',hex(tick_addr))
+          print('ORIGINAL_HOOK',original_hook.hex(' '))
+          print('NEW_HOOK',hook.hex(' '),'AT',hex(BASE+0x10C1C),'TICK_ADDR',hex(tick_addr))
           print('TICK_SIZE',len(tick))
           print('SHA256',hashlib.sha256(d).hexdigest())
           print('DIFFS_IN_SOURCE_RANGE',[hex(x) for x in diffs])
