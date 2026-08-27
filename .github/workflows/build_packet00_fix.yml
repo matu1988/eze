@@ -1,4 +1,4 @@
-name: Trace IP Destination Wrappers
+name: Build Packet00 IP1 Only
 
 on:
   push:
@@ -6,28 +6,89 @@ on:
       - '.github/workflows/build_packet00_fix.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace wrappers
+      - name: Patch firmware
+        shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine
           python - <<'PY'
           from pathlib import Path
+          import hashlib
+          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          import struct
-          B=0x08000000
-          d=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
+
+          BASE=0x08000000
+          SRC=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          OUT=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin')
+          d=bytearray(SRC.read_bytes())
+          assert len(d)==69076, len(d)
+          assert hashlib.sha256(d).hexdigest()=='dbe3a5dbfaff5056dcaa4a36574a4bb10764502f8e275e3b761ac33e29dc3ee7'
+          assert d[0x10CAA:0x10CAE]==bytes.fromhex('20 46 81 88')
+          assert d[0x10DCC:0x10DD2]==bytes.fromhex('43 F2 30 02 91 42')
+
+          ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          stub_off=len(d)
+          stub_addr=BASE+stub_off
+
+          # Replace only: mov r0,r4 ; ldrh r1,[r0,#4]
+          # with a call to the new Packet00 bypass stub.
+          call,_=ks.asm(f'bl 0x{stub_addr:08x}', addr=BASE+0x10CAA, as_bytes=True)
+          call=bytes(call)
+          assert len(call)==4, call.hex()
+          d[0x10CAA:0x10CAE]=call
+
+          asm=f'''\
+              mov r0, r4
+              ldrh r1, [r0, #4]
+              movw r2, #0x3030
+              cmp r1, r2
+              bne non00
+              bl 0x0800b4e0
+              pop {{r4, pc}}
+          non00:
+              bx lr
+          '''
+          stub,_=ks.asm(asm, addr=stub_addr, as_bytes=True)
+          stub=bytes(stub)
+          d.extend(stub)
+          OUT.write_bytes(d)
+
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          for s,e in [(0x10B20,0x10C30),(0x10C80,0x10D10)]:
-            print(f'\nREGION {B+s:08X}-{B+e:08X}')
-            for i in md.disasm(d[s:e],B+s):
+          print('SOURCE_SIZE',69076)
+          print('OUTPUT_SIZE',len(d))
+          print('PATCH_OFFSET',hex(0x10CAA),'CALL',call.hex(' '),'STUB',hex(stub_addr))
+          print('STUB_BYTES',stub.hex(' '))
+          print('SHA256',hashlib.sha256(d).hexdigest())
+          print('--- patched call ---')
+          for i in md.disasm(bytes(d[0x10CA0:0x10CC8]),BASE+0x10CA0):
               print(f'{i.address:08X}: {i.bytes.hex(" "):12} {i.mnemonic:8} {i.op_str}')
-          print('\nLITERALS 10D40-10DC4')
-          for off in range(0x10D40,0x10DC4,4):
-            if off+4<=len(d): print(f'{B+off:08X}: {struct.unpack_from("<I",d,off)[0]:08X}')
+          print('--- stub ---')
+          for i in md.disasm(stub,stub_addr):
+              print(f'{i.address:08X}: {i.bytes.hex(" "):12} {i.mnemonic:8} {i.op_str}')
+
+          # Safety: only the 4-byte call differs inside original image; added bytes are the stub.
+          src=SRC.read_bytes()
+          diffs=[i for i,(a,b) in enumerate(zip(src,d)) if a!=b]
+          assert diffs==list(range(0x10CAA,0x10CAE)), diffs
+          print('DIFFS_IN_ORIGINAL_RANGE',[hex(x) for x in diffs])
           PY
+      - name: Commit corrected firmware
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin
+          git commit -m "Add Packet00 IP1-only firmware" || true
+          git push
+      - name: Upload corrected firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_196_PACKET00_SOLO_IP1
+          path: MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin
+          if-no-files-found: error
