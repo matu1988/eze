@@ -1,4 +1,4 @@
-name: Trace Live IMEI and Packet00 Paths
+name: Trace Packet00 Second Path
 
 on:
   push:
@@ -13,79 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace scheduler and live wrapper
+      - name: Dump live paths
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm import ARM_OP_IMM
-          import struct
-
-          BASE=0x08000000
-          FN='MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin'
-          d=Path(FN).read_bytes()
-          md=Cs(CS_ARCH_ARM, CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          md.detail=True
-
-          def dump(start,end,title):
-              print(f'\n===== {title} {BASE+start:08X}-{BASE+end:08X} =====')
-              for i in md.disasm(d[start:end], BASE+start):
+          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          B=0x08000000
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          def dump(s,e,title):
+              print(f'\n===== {title} {B+s:08X}-{B+e:08X} =====')
+              for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-
-          dump(0x9400,0x9840,'event scheduler full context')
-          dump(0x4F80,0x5120,'original routine near 0x506C')
-          dump(0x10B00,0x10C90,'appended wrappers and IMEI60')
-
-          targets={
-              0x08010C16:'IMEI wrapper',
-              0x08010C22:'IMEI tick',
-              0x0800506C:'original 506C even',
-              0x0800506D:'original 506D thumb',
-              0x08008CE0:'Packet00 generator',
-              0x08007620:'TREG getter',
-              0x08003E0C:'deadline timer',
-          }
-          print('\n===== DIRECT CALL SCAN =====')
-          ins=list(md.disasm(d,BASE))
-          for i in ins:
-              if not i.mnemonic.startswith('bl'):
-                  continue
-              if not i.operands or i.operands[0].type != ARM_OP_IMM:
-                  continue
-              t=i.operands[0].imm & 0xffffffff
-              # Capstone normalizes Thumb target to even address.
-              for wanted,name in targets.items():
-                  if (t & ~1)==(wanted & ~1):
-                      print(f'{i.address:08X}: {i.mnemonic} {i.op_str} -> {name} ({wanted:08X})')
-
-          # Print context around every direct call to IMEI wrapper / Packet00 generator / 506C.
-          interesting=[]
-          for i in ins:
-              if not i.mnemonic.startswith('bl') or not i.operands or i.operands[0].type!=ARM_OP_IMM:
-                  continue
-              t=i.operands[0].imm & 0xffffffff
-              if any((t&~1)==(x&~1) for x in [0x08010C16,0x08010C22,0x0800506C,0x08008CE0]):
-                  interesting.append(i.address)
-          for a in interesting:
-              off=a-BASE
-              dump(max(0,off-40), min(len(d),off+48), f'call context around {a:08X}')
-
-          print('\n===== LITERAL TABLE 0x10D40-0x10DC4 =====')
-          for off in range(0x10D40,0x10DC4,4):
-              if off+4<=len(d):
-                  v=struct.unpack_from('<I',d,off)[0]
-                  print(f'{BASE+off:08X}: {v:08X}')
-
-          print('\n===== REFERENCES TO CUSTOM RAM =====')
-          for addr in range(0x20004390,0x200043C1,4):
-              raw=struct.pack('<I',addr)
-              ps=[]; p=0
-              while True:
-                  p=d.find(raw,p)
-                  if p<0: break
-                  ps.append(p); p+=1
-              if ps:
-                  print(hex(addr),[hex(x) for x in ps])
+          dump(0x3B80,0x3C30,'live loop / IMEI wrapper caller')
+          dump(0x9608,0x9840,'first Packet00 scheduler function')
+          dump(0x9DF0,0x9EE0,'second Packet00 scheduler path')
+          dump(0x9F60,0xA040,'neighbor periodic functions')
           PY
