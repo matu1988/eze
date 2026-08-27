@@ -1,4 +1,4 @@
-name: Build Packet00 IP1 IP2 Fix
+name: Diagnose Packet00 Routing
 
 on:
   push:
@@ -7,64 +7,37 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch:
+  diagnose:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build corrected firmware
-        shell: python
-        run: |
-          from pathlib import Path
-          import hashlib
-
-          src = Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
-          dst = Path('MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin')
-          data = bytearray(src.read_bytes())
-
-          patches = [
-              (0x10CAE, bytes.fromhex('45 F2 63 02'), bytes.fromhex('00 F0 89 F8')),
-              (0x10CB4, bytes.fromhex('04 D0'), bytes.fromhex('02 D1')),
-              (0x10CBA, bytes.fromhex('09 B9'), bytes.fromhex('09 B1')),
-          ]
-
-          assert len(data) == 69076, f'Unexpected firmware size: {len(data)}'
-          for offset, old, new in patches:
-              got = bytes(data[offset:offset+len(old)])
-              assert got == old, f'Unexpected bytes at 0x{offset:X}: {got.hex(" ")}'
-              data[offset:offset+len(new)] = new
-
-          dst.write_bytes(data)
-          check = dst.read_bytes()
-          assert len(check) == 69076
-          for offset, old, new in patches:
-              assert check[offset:offset+len(new)] == new
-
-          print(f'Created: {dst}')
-          print(f'Size: {len(check)}')
-          print(f'SHA256: {hashlib.sha256(check).hexdigest()}')
-          print('Packet00 selector: first pass IP2, duplicate pass IP1')
-
-      - name: Upload corrected firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_196_PACKET00_IP1_IP2_FIX
-          path: MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin
-          if-no-files-found: error
-
-      - name: Commit corrected firmware
+      - name: Disassemble routing hook
         shell: bash
         run: |
-          git config user.name "packet00-fix-bot"
-          git config user.email "actions@users.noreply.github.com"
-          git add MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin
-          if git diff --cached --quiet; then
-            echo "Firmware already present"
-          else
-            git commit -m "Add MA196 Packet00 IP1 and IP2 fix"
-            git push
-          fi
+          python -m pip install --quiet capstone
+          python - <<'PY'
+          from pathlib import Path
+          from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+
+          files = [
+              'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
+              'MA_196-GE-AR_PACKET00_IP1_IP2_FIX.bin',
+          ]
+          start = 0x10C70
+          end = 0x10D40
+          base_addr = 0x08000000
+          md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
+          md.detail = True
+
+          for fn in files:
+              data = Path(fn).read_bytes()
+              print('\n====', fn, '====')
+              chunk = data[start:end]
+              for insn in md.disasm(chunk, base_addr + start):
+                  print(f'{insn.address:08X}: {insn.bytes.hex(" "):12} {insn.mnemonic:8} {insn.op_str}')
+          PY
