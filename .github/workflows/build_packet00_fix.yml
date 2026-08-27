@@ -1,4 +1,4 @@
-name: Trace TREG Timer References
+name: Compare MA193 MA196 Hooks
 
 on:
   push:
@@ -16,69 +16,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Trace timer references
+      - name: Compare hooks
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          from capstone.arm import ARM_OP_MEM, ARM_REG_PC
           import struct
 
-          base = 0x08000000
-          target = 0x20003BFC
-          files = [
-              'MA_193-GE-AR.bin',
-              'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
-              'MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin',
-          ]
-          md = Cs(CS_ARCH_ARM, CS_MODE_THUMB | CS_MODE_LITTLE_ENDIAN)
-          md.detail = True
+          base=0x08000000
+          orig=Path('MA_193-GE-AR.bin').read_bytes()
+          mod=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
+          md=Cs(CS_ARCH_ARM, CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
 
-          def disasm_window(data, center, before=0x80, after=0x80):
-              s=max(0, center-before); e=min(len(data), center+after)
-              # align halfword
-              s &= ~1
-              for insn in md.disasm(data[s:e], base+s):
-                  mark='>>' if center <= insn.address-base < center+4 else '  '
+          # Group changed bytes in original address range, allowing very small gaps to remain in one patch cluster.
+          diffs=[i for i in range(min(len(orig),len(mod))) if orig[i]!=mod[i]]
+          groups=[]
+          if diffs:
+              s=p=diffs[0]
+              for x in diffs[1:]:
+                  if x-p<=4:
+                      p=x
+                  else:
+                      groups.append((s,p+1)); s=p=x
+              groups.append((s,p+1))
+          print('Original size',len(orig),'Modified size',len(mod),'diff bytes',len(diffs),'groups',len(groups))
+          for gi,(s,e) in enumerate(groups):
+              print(f'\n===== DIFF GROUP {gi} 0x{s:X}-0x{e:X} len {e-s} =====')
+              print('ORIG:',orig[s:e].hex(' '))
+              print('MOD :',mod[s:e].hex(' '))
+              ws=max(0,(s-0x30)&~1); we=min(len(orig),e+0x50)
+              print('-- ORIG disasm --')
+              for insn in md.disasm(orig[ws:we],base+ws):
+                  mark='>>' if s<=insn.address-base<e else '  '
+                  print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
+              print('-- MOD disasm --')
+              for insn in md.disasm(mod[ws:we],base+ws):
+                  mark='>>' if s<=insn.address-base<e else '  '
                   print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
 
-          for fn in files:
-              data=Path(fn).read_bytes()
-              print('\n================',fn,'================')
-              raw=struct.pack('<I',target)
-              hits=[]; p=0
-              while True:
-                  i=data.find(raw,p)
-                  if i<0: break
-                  hits.append(i); p=i+1
-              print('literal target hits:', [hex(x) for x in hits])
-              for h in hits:
-                  print(f'\n-- literal 0x{h:X} = {target:08X}; candidate LDR refs --')
-                  # Find PC-relative LDR instructions across nearby code whose literal address equals h.
-                  candidates=[]
-                  s=max(0,h-0x400); e=min(len(data),h+0x20)
-                  s &= ~1
-                  for insn in md.disasm(data[s:e],base+s):
-                      if insn.mnemonic.startswith('ldr') and insn.operands:
-                          for op in insn.operands:
-                              if op.type==ARM_OP_MEM and op.mem.base==ARM_REG_PC:
-                                  # Thumb literal base is Align(PC+4,4)
-                                  lit=((insn.address+4)&~3)+op.mem.disp
-                                  if lit==base+h:
-                                      candidates.append(insn.address-base)
-                  print('candidate instructions:', [hex(x) for x in candidates])
-                  for c in candidates:
-                      print(f'\nwindow around ref 0x{c:X}:')
-                      disasm_window(data,c,0x70,0x90)
-
-              # Find all 32-bit literal values close to timer target to reveal adjacent globals.
-              print('\n32-bit RAM literals in appended block 0x10A00-end:')
-              vals=[]
-              for off in range(0x10A00,len(data)-3,4):
-                  v=struct.unpack_from('<I',data,off)[0]
-                  if 0x20000000 <= v < 0x20010000:
-                      vals.append((off,v))
-              print([(hex(o),hex(v)) for o,v in vals])
+          # Manual 16-bit Thumb LDR literal refs to RAM TREG value 0x20003BFC literal pools.
+          target=0x20003BFC
+          raw=struct.pack('<I',target)
+          hits=[];p=0
+          while True:
+              i=orig.find(raw,p)
+              if i<0:break
+              hits.append(i);p=i+1
+          print('\nTREG RAM literal hits', [hex(h) for h in hits])
+          for h in hits:
+              refs=[]
+              for off in range(max(0,h-0x500)&~1,h,2):
+                  hw=struct.unpack_from('<H',orig,off)[0]
+                  if (hw & 0xF800)==0x4800:
+                      imm8=hw & 0xFF
+                      lit=(((base+off+4)&~3)+(imm8<<2))-base
+                      if lit==h:
+                          refs.append(off)
+              print('literal',hex(h),'16-bit LDR refs', [hex(r) for r in refs])
+              for r in refs:
+                  ws=max(0,(r-0x60)&~1); we=min(len(orig),r+0x80)
+                  for tag,data in [('ORIG',orig),('MOD',mod)]:
+                      print(f'-- {tag} around ref 0x{r:X} --')
+                      for insn in md.disasm(data[ws:we],base+ws):
+                          mark='>>' if r<=insn.address-base<r+2 else '  '
+                          print(f'{mark} {insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
           PY
