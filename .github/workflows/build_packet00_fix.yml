@@ -1,4 +1,4 @@
-name: Inspect Packet00 Timer Cleanup
+name: Trace Event Cleanup Valid Entry
 
 on:
   push:
@@ -16,48 +16,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Inspect event processing
+      - name: Trace cleanup
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
+          import struct
 
           base=0x08000000
-          files=[
-            ('ORIG','MA_193-GE-AR.bin'),
-            ('MOD','MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'),
-            ('V2','MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin'),
-          ]
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
           md.detail=True
 
-          def dump(tag,data,start,end):
-              print(f'\n===== {tag} 0x{start:X}-0x{end:X} =====')
+          for tag,fn in [('ORIG','MA_193-GE-AR.bin'),('MOD','MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'),('V2','MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin')]:
+              data=Path(fn).read_bytes()
+              print(f'\n===== {tag} event loop from 0x9704 =====')
+              for insn in md.disasm(data[0x9704:0x9850],base+0x9704):
+                  print(f'{insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
+
+          # Dump the event generator function from exact valid entry 0x8CE0 and nearby called timer function 0x3E0C.
+          data=Path('MA_193-GE-AR.bin').read_bytes()
+          for name,start,end in [('generator_8CE0',0x8CE0,0x8D5C),('timer_3E0C',0x3E0C,0x3EB0),('event_8178',0x8178,0x8220)]:
+              print(f'\n===== {name} =====')
               for insn in md.disasm(data[start:end],base+start):
                   print(f'{insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
 
-          for tag,fn in files:
+          # Hex around 0x97B0-0x9800 for exact comparison.
+          print('\n===== HEX DIFFERENCE 0x97A0-0x9800 =====')
+          for tag,fn in [('ORIG','MA_193-GE-AR.bin'),('MOD','MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin'),('V2','MA_196-GE-AR_PACKET00_IP1_IP2_FIX_V2.bin')]:
               data=Path(fn).read_bytes()
-              dump(tag+' outer event fn',data,0x96B0,0x9860)
-
-          data=Path('MA_193-GE-AR.bin').read_bytes()
-          for name,start,end in [
-              ('orig_B4C8',0xB470,0xB540),
-              ('orig_B4E0',0xB490,0xB560),
-              ('orig_A8A8',0xA840,0xA930),
-              ('orig_8CE0',0x8C70,0x8D60),
-              ('orig_9148',0x90E0,0x91B0),
-          ]:
-              dump(name,data,start,end)
-
-          # Search event-processing function for accesses using immediate 0x48 and stores/loads likely touching timer field.
-          print('\n===== instructions mentioning #0x48 in 0x9600-0x9900 =====')
-          for tag,fn in files:
-              data=Path(fn).read_bytes()
-              print('\n--',tag,'--')
-              for insn in md.disasm(data[0x9600:0x9900],base+0x9600):
-                  if '#0x48' in insn.op_str or '#0x4c' in insn.op_str or '#0x44' in insn.op_str:
-                      print(f'{insn.address:08X}: {insn.bytes.hex(" "):14} {insn.mnemonic:8} {insn.op_str}')
+              print(tag, data[0x97A0:0x9800].hex(' '))
           PY
