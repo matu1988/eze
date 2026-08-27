@@ -1,4 +1,4 @@
-name: Trace Independent TREG Timer
+name: Verify Free RAM For TREG
 
 on:
   push:
@@ -13,8 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace timer and RAM state
-        shell: bash
+      - name: Verify RAM neighborhood
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
@@ -22,47 +21,22 @@ jobs:
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
           from capstone.arm import ARM_OP_MEM, ARM_REG_PC
           import struct
-
           B=0x08000000
-          names=[
-            'MA_193-GE-AR.bin',
-            'MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin',
-            'MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin',
-          ]
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.detail=True
-
-          def dump(data,s,e,label):
-              print(f'\n===== {label} {B+s:08X}-{B+e:08X} =====')
-              for i in md.disasm(data[s:e],B+s):
-                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-
-          for fn in names:
+          for fn in ['MA_193-GE-AR.bin','MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin']:
               d=Path(fn).read_bytes()
-              print(f'\n######## {fn} size={len(d)} ########')
-              dump(d,0x3DE0,0x3E60,'deadline_3E0C')
-              dump(d,0x8CE0,0x8D60,'packet00_gen_8CE0')
-              dump(d,0x96F0,0x9740,'periodic_scheduler')
-              if len(d)>0x10C20:
-                  dump(d,0x10C16,min(len(d),0x10C90),'imei60')
-                  dump(d,0x10CCC,min(len(d),0x10E10),'dup_and_tail')
-
-              print('\nRAM literal occurrences 0x20004380-0x200043D0:')
-              for addr in range(0x20004380,0x200043D1,4):
-                  raw=struct.pack('<I',addr)
-                  pos=[]; p=0
+              print('\n###',fn)
+              for s,e in [(0xC4D0,0xC550),(0x10C20,min(len(d),0x10E20))]:
+                  if s>=len(d): continue
+                  print(f'-- {B+s:08X}-{B+e:08X}')
+                  for i in md.disasm(d[s:e],B+s):
+                      print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+              print('literal refs exact:')
+              for a in [0x200043A4,0x200043A8,0x200043AC,0x200043B0,0x200043B4,0x200043B8,0x200043BC]:
+                  raw=struct.pack('<I',a); ps=[]; p=0
                   while True:
                       p=d.find(raw,p)
                       if p<0: break
-                      pos.append(p); p+=1
-                  if pos:
-                      print(hex(addr),[hex(x) for x in pos])
-
-              print('\nMax exact 0x2000xxxx literals:')
-              vals=[]
-              for off in range(0,len(d)-3,4):
-                  v=struct.unpack_from('<I',d,off)[0]
-                  if 0x20000000 <= v < 0x20010000:
-                      vals.append((v,off))
-              for v,off in sorted(vals)[-30:]:
-                  print(hex(v),hex(off))
+                      ps.append(p); p+=1
+                  print(hex(a),[hex(x) for x in ps])
           PY
