@@ -1,4 +1,4 @@
-name: Trace TREG Conversion
+name: Trace Timer Clock Unit
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump TREG conversion
+      - name: Dump clock source
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -22,16 +22,8 @@ jobs:
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
           d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes(); B=0x08000000
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          def dump(s,e,title):
+          for s,e,title in [(0x3D30,0x3D80,'clock source around 0x3D50'),(0x140,0x190,'possible divisor helper')]:
               print(f'\n===== {title} =====')
               for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          dump(0x73B0,0x74A0,'TREG init continuation / literal pool')
-          dump(0xC150,0xC220,'parser 0x0800C1B8 context')
-          # Search BL targets to 0x7620 in whole image, and literal 0x20003BFC users
-          for target in [0x08007620,0x0800C1B8]:
-              print(f'\nCALLS TO {target:08X}')
-              for i in md.disasm(d,B):
-                  if i.mnemonic.startswith('bl') and i.op_str.lower() in (f'#0x{target:x}',f'0x{target:x}'):
-                      print(f'{i.address:08X}: {i.mnemonic} {i.op_str}')
           PY
