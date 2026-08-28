@@ -1,4 +1,4 @@
-name: Analyze MA193 Server Routing
+name: Analyze MA193 Event Lifecycle
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace GPRS sockets, LAN path and native timer ownership
+      - name: Trace status field, queue lifecycle and timer reset causes
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -25,97 +25,64 @@ jobs:
           d=Path('MA_193-GE-AR.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
           def dis(s,e): return list(md.disasm(d[s:e],B+s))
+          def dump_addr(addr,pre=28,post=44,title=''):
+              off=addr-B; s=max(0,(off-pre)&~1); e=min(len(d),off+post)
+              print('\n### '+(title or f'CTX {addr:08X}'))
+              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
           def dump(s,e,title):
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
-          def cstr(addr,n=100):
-              off=addr-B
-              if not (0<=off<len(d)): return None
-              out=[]
-              for x in d[off:off+n]:
-                  if x==0: break
-                  if not 32<=x<=126: return None
-                  out.append(chr(x))
-              return ''.join(out) if out else None
-          def ptrrefs(addr):
-              pat=struct.pack('<I',addr); p=0; out=[]
-              while True:
-                  q=d.find(pat,p)
-                  if q<0: return out
-                  out.append(B+q); p=q+1
-          def literals(s,e,title):
-              print('\n### LITERALS '+title)
-              for i in dis(s,e):
-                  if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
-                      m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                      if not m: continue
-                      imm=int(m.group(1),0) if m.group(1) else 0
-                      la=((i.address+4)&~3)+imm
-                      if B<=la<=B+len(d)-4:
-                          v=u32(la); s0=cstr(v)
-                          print(f'{i.address:08X} -> literal {la:08X} = {v:08X}'+(f' -> {s0!r}' if s0 else ''))
+          allins=dis(0x100,len(d))
 
-          print('### ASCII MODEM/NETWORK COMMANDS')
-          keys=('QIOPEN','QISEND','QICLOSE','QISTATE','SENDUDP','IPSTART','UDP','Gprs','Lan')
-          for m in re.finditer(rb'[ -~]{3,}',d):
-              s=m.group().decode('ascii','replace')
-              if any(k.lower() in s.lower() for k in keys):
-                  print(f'{B+m.start():08X}: {s}')
+          print('### ALL MEMORY ACCESSES WITH +0x18 IN COMMUNICATION / EVENT CORE')
+          hits=[]
+          for i in allins:
+              if 0x08007E00 <= i.address <= 0x0800A100 and '#0x18]' in i.op_str.lower():
+                  hits.append(i.address)
+                  print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
+          for a in hits: dump_addr(a,30,50,f'+0x18 ACCESS {a:08X}')
 
-          print('\n### POINTER REFS TO NETWORK COMMAND STRINGS')
-          for m in re.finditer(rb'[ -~]{3,}',d):
-              s=m.group().decode('ascii','replace')
-              if any(k.lower() in s.lower() for k in ('qiopen','qisend','sendudp','gprs','lan')):
-                  a=B+m.start(); refs=ptrrefs(a)
-                  print(f'{s!r} {a:08X} refs={[f"{x:08X}" for x in refs]}')
+          print('\n### ALL DIRECT STORES TO +0x18 ANYWHERE')
+          sh=[]
+          for i in allins:
+              op=i.op_str.lower()
+              if i.mnemonic.startswith('str') and '#0x18]' in op:
+                  sh.append(i.address); print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
+          for a in sh: dump_addr(a,36,52,f'+0x18 STORE {a:08X}')
 
-          # Exact state object pointers loaded by native callers.
-          print('\n### STATE OBJECT POINTERS')
-          for la,name in [(0x080095B0,'A object literal'),(0x08009DAC,'B object literal')]:
-              if B<=la<=B+len(d)-4: print(name, f'{la:08X}', f'{u32(la):08X}')
+          print('\n### CALLERS 0x08009148')
+          calls=[]
+          for i in allins:
+              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08009148): calls.append(i.address)
+          print([f'{x:08X}' for x in calls])
+          for a in calls: dump_addr(a,18,24,f'CALL 9148 @ {a:08X}')
+          dump(0x90F0,0x9190,'FUNCTION 0x08009148 + NEIGHBORS')
 
-          # Wider task/controller contexts tie A to GPRS and B to LAN.
-          dump(0x92E0,0x95B8,'GPRS CONTROLLER / CALLER CHAIN TO A')
-          literals(0x92E0,0x95B8,'GPRS CONTROLLER')
-          dump(0x99E0,0x9DB0,'LAN CONTROLLER / CALLER CHAIN TO B')
-          literals(0x99E0,0x9DB0,'LAN CONTROLLER')
+          print('\n### CALLERS 0x08008DEC')
+          calls=[]
+          for i in allins:
+              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08008DEC): calls.append(i.address)
+          print([f'{x:08X}' for x in calls])
+          for a in calls: dump_addr(a,22,30,f'CALL 8DEC @ {a:08X}')
+          dump(0x8DC0,0x8E70,'FUNCTION 0x08008DEC FULL')
 
-          # GPRS setup/send nearby functions invoked by controller.
-          dump(0xA180,0xA350,'GPRS CONNECTION/SOCKET SETUP CANDIDATES')
-          literals(0xA180,0xA350,'GPRS CONNECTION/SOCKET SETUP')
-          dump(0xA660,0xA8A8,'GPRS SOCKET/DESTINATION SETUP BEFORE SEND')
-          literals(0xA660,0xA8A8,'GPRS SOCKET DESTINATION')
+          print('\n### CALLERS / BODY OF 0x08007FD4 (EVENT RESET)')
+          calls=[]
+          for i in allins:
+              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08007FD4): calls.append(i.address)
+          print([f'{x:08X}' for x in calls])
+          for a in calls: dump_addr(a,18,24,f'CALL 7FD4 @ {a:08X}')
+          dump(0x7F80,0x8048,'FUNCTION 0x08007FD4 FULL')
 
-          # LAN setup/send neighboring functions.
-          dump(0xB9C0,0xBD00,'LAN UDP SETUP/SEND FAMILY')
-          literals(0xB9C0,0xBD00,'LAN UDP FAMILY')
+          # Event structure builders/copy/reset candidates around 0x8A00-0x91xx.
+          dump(0x8A00,0x8CE0,'EVENT CHANNEL / SELECTOR HELPERS BEFORE PACKET00')
+          dump(0x8F40,0x90F0,'EVENT CHANNEL STATE FUNCTIONS BEFORE 9148')
 
-          # Robust scan: locate movs r0,#16..19 and any call to config getter within following 12 instructions.
-          print('\n### CONFIG IDS 16..19 USE SITES')
-          for off in range(0x6000,min(len(d),0xC500),2):
-              xs=list(md.disasm(d[off:off+4],B+off,1))
-              if not xs: continue
-              i=xs[0]
-              if i.mnemonic!='movs' or not i.op_str.startswith('r0,'): continue
-              try: val=int(i.op_str.split('#')[-1],0)
-              except: continue
-              if val not in (16,17,18,19): continue
-              # disassemble next 40 bytes from exact instruction boundary
-              seq=list(md.disasm(d[off:off+48],B+off))
-              hit=any(x.mnemonic=='bl' and x.op_str.lower().replace('#','')==hex(0x08007B4C) for x in seq[:12])
-              if hit:
-                  print(f'id={val} start={i.address:08X}')
-                  dump(max(0,off-12),min(len(d),off+52),f'CONFIG ID {val}')
-
-          # Native timer/reset neighborhoods and all instructions touching owner status byte +0x18.
-          dump(0x93D0,0x94A0,'A STRUCT INITIALIZATION/RESET')
-          dump(0x9B4C,0x9C20,'B STRUCT INITIALIZATION/RESET')
-          dump(0x97B0,0x9820,'A STATE3/STATE4 TIMER RESET')
-          dump(0x9F20,0x9FA8,'B STATE3/STATE4 TIMER RESET')
-
-          # Find literal refs to A/B object RAM bases if known.
-          for la,name in [(0x080095B0,'A'),(0x08009DAC,'B')]:
-              base=u32(la); print(f'\n### RAW POINTER REFS TO {name} BASE {base:08X}')
-              print([f'{x:08X}' for x in ptrrefs(base)])
+          # Show all accesses to A +0x48 and B +0x3c and status +0x39 in state machine cores.
+          print('\n### TIMER / STATUS FIELD ACCESSES A+B')
+          for i in allins:
+              if 0x08009300 <= i.address <= 0x0800A000:
+                  op=i.op_str.lower()
+                  if any(k in op for k in ('#0x48]','#0x3c]','#0x39]','#0x38]')):
+                      print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
           PY
