@@ -1,4 +1,4 @@
-name: Map MA193 to Known-Booting MA196 Original-Range Diffs
+name: Build MA193 Safe Four-Byte Hooks TEST3
 
 on:
   push:
@@ -9,48 +9,119 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Enumerate all diff ranges and possible image metadata
+      - name: Build and validate safe minimal hooks
         shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine unicorn
           python - <<'PY'
           from pathlib import Path
-          import struct
+          import hashlib, struct
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
+          from keystone import Ks,KS_ARCH_ARM,KS_MODE_THUMB,KS_MODE_LITTLE_ENDIAN
           B=0x08000000
-          o=Path('MA_193-GE-AR.bin').read_bytes(); k=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          o=Path('MA_193-GE-AR.bin').read_bytes()
+          assert len(o)==68388
+          assert hashlib.sha1(b'blob '+str(len(o)).encode()+b'\0'+o).hexdigest()=='6cb97de270e186233d189e13e4056fcbbb0b106f'
+          # Exact safe hook sites: each replaces exactly one 32-bit instruction only.
+          assert o[0x9736:0x973a]==bytes.fromhex('01 f0 d3 fe') # BL B4E0
+          assert o[0x9754:0x9758]==bytes.fromhex('45 f2 63 03') # movw r3,#5063
+          assert o[0x97c0:0x97c4]==bytes.fromhex('03 7e 16 34') # ldrb r3,[r0,#18]; adds r4,#16
+          # Everything following each hook remains stock.
+          stock_after_9754=o[0x9758:0x9768]
+          stock_after_97c0=o[0x97c4:0x97d4]
+          ks=Ks(KS_ARCH_ARM,KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
-          diffs=[i for i in range(len(o)) if o[i]!=k[i]]
-          groups=[]
-          if diffs:
-            s=p=diffs[0]
-            for x in diffs[1:]:
-              if x==p+1:p=x
-              else: groups.append((s,p+1));s=p=x
-            groups.append((s,p+1))
-          print('DIFF_COUNT',len(diffs),'GROUPS',len(groups))
-          for a,b in groups:
-            print('\nRANGE',hex(a),hex(b),'ADDR',hex(B+a),hex(B+b),'LEN',b-a)
-            print('193  ',o[a:b].hex(' '))
-            print('KNOWN',k[a:b].hex(' '))
-            cs=max(0,a-12); ce=min(len(o),b+20)
-            print('193 CONTEXT')
-            for i in md.disasm(o[cs:ce],B+cs): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-            print('KNOWN CONTEXT')
-            for i in md.disasm(k[cs:ce],B+cs): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          # Search 193 for literal references to original end address/file sizes and nearby values.
-          for v in (len(o),B+len(o),len(k),B+len(k),0x10b24,0x8010b24):
-            pat=struct.pack('<I',v); hits=[];p=0
-            while True:
-              q=o.find(pat,p)
-              if q<0:break
-              hits.append(hex(B+q));p=q+1
-            print('VALUE_REFS_193',hex(v),hits)
-          # Last 128 bytes compare.
-          print('TAIL193',o[-128:].hex(' '))
-          print('TAILKNOWN_AT_SAME',k[len(o)-128:len(o)].hex(' '))
+          def asm(s,a):
+            enc,_=ks.asm(s,addr=a); return bytes(enc)
+          def align4(x): return (x+3)&~3
+
+          route=B+len(o)
+          route_code=asm('''
+            ldrh r1, [r0, #4]
+            movw r2, #0x3030
+            cmp r1, r2
+            bne route_original
+            ldrb r3, [r0, #2]
+            movw r2, #0x3d82
+            movt r2, #0x2000
+            movs r1, #0
+            strb r1, [r2, r3]
+          route_original:
+            b.w 0x0800b4e0
+          ''',route)
+
+          post=align4(route+len(route_code))
+          post_code=asm('''
+            ldrh r2, [r4, #0x1a]
+            movw r3, #0x3030
+            cmp r2, r3
+            beq post_done
+            movw r3, #0x5063
+          post_done:
+            bx lr
+          ''',post)
+
+          treg=align4(post+len(post_code))
+          treg_code=asm('''
+            ldrh r2, [r0, #0x1a]
+            movw r3, #0x3030
+            cmp r2, r3
+            ite eq
+            moveq r3, #1
+            movne r3, #0
+            adds r4, #0x16
+            bx lr
+          ''',treg)
+
+          out=bytearray(o)
+          out.extend(route_code)
+          while len(out)<post-B: out.append(0)
+          out.extend(post_code)
+          while len(out)<treg-B: out.append(0)
+          out.extend(treg_code)
+          while len(out)%4: out.append(0)
+          out[0x9736:0x973a]=asm(f'bl 0x{route:08x}',B+0x9736)
+          out[0x9754:0x9758]=asm(f'bl 0x{post:08x}',B+0x9754)
+          out[0x97c0:0x97c4]=asm(f'bl 0x{treg:08x}',B+0x97c0)
+          # No other original-range byte may differ.
+          allowed=set(range(0x9736,0x973a))|set(range(0x9754,0x9758))|set(range(0x97c0,0x97c4))
+          diffs=[i for i in range(len(o)) if o[i]!=out[i]]
+          assert diffs and all(i in allowed for i in diffs), diffs
+          assert out[0x9758:0x9768]==stock_after_9754
+          assert out[0x97c4:0x97d4]==stock_after_97c0
+          assert out[0x9706:0x9718]==o[0x9706:0x9718]
+          assert out[:0x100]==o[:0x100]
+          assert out[0x9e24:0x9fa8]==o[0x9e24:0x9fa8]
+
+          print('HOOKS')
+          for off,target in ((0x9736,route),(0x9754,post),(0x97c0,treg)):
+            ins=list(md.disasm(bytes(out[off:off+4]),B+off))[0]
+            print(hex(B+off),ins.mnemonic,ins.op_str)
+            assert ins.mnemonic=='bl' and int(ins.op_str.replace('#',''),16)==target
+          for name,a,c in [('ROUTE',route,route_code),('POST',post,post_code),('TREG',treg,treg_code)]:
+            print('\n',name,hex(a),len(c))
+            for i in md.disasm(c,a): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+
+          # Static semantic checks.
+          # Route helper MUST tail-call original B4E0 and never return directly.
+          ris=list(md.disasm(route_code,route)); assert ris[-1].mnemonic=='b.w' and '0x800b4e0' in ris[-1].op_str
+          # Post helper must only select comparison constant; original ldrh/cmp/branches remain immediately after hook.
+          assert out[0x9758:0x9766]==o[0x9758:0x9766]
+          # TREG helper reconstructs both overwritten original effects: r3 value + r4 += 0x16.
+          assert any(i.mnemonic=='adds' and 'r4' in i.op_str and '#0x16' in i.op_str for i in md.disasm(treg_code,treg))
+
+          name='MA_193-GE-AR_PACKET00_IP1_TREG_SAFEHOOK_TEST3.bin'
+          Path(name).write_bytes(out)
+          print('\nBASE_SIZE',len(o),'OUT_SIZE',len(out))
+          print('OUT_SHA256',hashlib.sha256(out).hexdigest())
+          print('ORIGINAL_RANGE_DIFFS',len(diffs),[hex(x) for x in diffs])
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MA193_PACKET00_IP1_TREG_SAFEHOOK_TEST3
+          path: MA_193-GE-AR_PACKET00_IP1_TREG_SAFEHOOK_TEST3.bin
+          if-no-files-found: error
