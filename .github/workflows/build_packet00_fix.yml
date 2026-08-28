@@ -1,4 +1,4 @@
-name: Analyze MA193 Event Buffer Semantics
+name: Analyze MA193 Channel and LAN Routing
 
 on:
   push:
@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Map event buffer layout, channel values and native TREG reset
+      - name: Prove normal event channel and LAN server selector
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import re,struct
+          import struct,re
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
@@ -28,45 +28,76 @@ jobs:
           def dump(s,e,title):
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
+          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
+          def cstr(addr,n=96):
+              off=addr-B
+              if not 0<=off<len(d): return None
+              out=[]
+              for x in d[off:off+n]:
+                  if x==0: break
+                  if not 32<=x<=126: return None
+                  out.append(chr(x))
+              return ''.join(out) if out else None
+          def refs(addr):
+              p=0; out=[]; pat=struct.pack('<I',addr)
+              while True:
+                  q=d.find(pat,p)
+                  if q<0: return out
+                  out.append(B+q);p=q+1
           allins=dis(0x100,len(d))
 
-          dump(0x80F0,0x8320,'EVENT CONSTRUCTOR 8178 + GENERIC INJECTOR 82A8')
-          dump(0x8A00,0x8C80,'EVENT CHANNEL HELPERS')
-          dump(0x8CE0,0x8D58,'PACKET00 GENERATOR')
+          # Normal-event path sets event[2] from 8AA4. Resolve the backing byte and all code that writes it.
+          dump(0x8A90,0x8AD8,'FUNCTION 8AA4 CHANNEL SOURCE')
+          print('\n### LITERAL VALUES IN 8AA4')
+          for a in (0x08008AC8,0x08008ACC):
+              print(f'{a:08X}: {u32(a):08X}')
+          channel_addr=u32(0x08008ACC)
+          print('channel_source_addr',f'{channel_addr:08X}','raw literal refs',[f'{x:08X}' for x in refs(channel_addr)])
 
-          print('\n### ALL CALLS TO GENERIC INJECTOR 0x080082A8 WITH PRECEDING ARGUMENT SETUP')
-          calls=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x080082A8)]
-          print([f'{x:08X}' for x in calls])
-          for a in calls:
-              off=a-B; dump(max(0,off-34),min(len(d),off+18),f'82A8 CALL {a:08X}')
-
-          print('\n### ALL CALLS TO NATIVE CONSTRUCTOR 0x08008178')
-          calls=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08008178)]
-          print([f'{x:08X}' for x in calls])
-          for a in calls:
-              off=a-B; dump(max(0,off-34),min(len(d),off+18),f'8178 CALL {a:08X}')
-
-          # Search robustly from each aligned halfword for single instructions that write byte offset 2 or load event code offsets 4/6.
-          print('\n### SINGLE-INSTRUCTION SCAN FOR EVENT BUFFER BYTE +2 WRITES')
+          print('\n### ROBUST SINGLE-INSTRUCTION WRITES TO CHANNEL SOURCE')
           seen=set()
-          for off in range(0x7000,min(len(d),0xE500),2):
+          for off in range(0x100,len(d)-4,2):
               xs=list(md.disasm(d[off:off+4],B+off,1))
               if not xs: continue
-              i=xs[0]; op=i.op_str.lower()
-              if i.mnemonic.startswith('strb') and ('#2]' in op or '#0x2]' in op):
-                  key=(i.address,i.bytes)
-                  if key not in seen:
-                      seen.add(key); print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
+              i=xs[0]
+              # show literal loads of exact channel address and nearby contexts
+              if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
+                  m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
+                  if m:
+                      imm=int(m.group(1),0) if m.group(1) else 0
+                      la=((i.address+4)&~3)+imm
+                      if B<=la<=B+len(d)-4 and u32(la)==channel_addr:
+                          if i.address not in seen:
+                              seen.add(i.address); o=i.address-B; dump(max(0,o-24),min(len(d),o+48),f'CHANNEL ADDR USER {i.address:08X}')
 
-          print('\n### STATE3 BUFFER RELATION PROOF')
-          dump(0x96CC,0x97DC,'A FROM OBJECT BASE TO EVENT BUFFER/TIMER RESET')
-          dump(0x9E24,0x9F48,'B FROM OBJECT BASE TO EVENT BUFFER/TIMER RESET')
+          dump(0x8C0C,0x8CDC,'NORMAL EVENT LOAD INTO COMM BUFFER')
 
-          # Identify event code loads in send/routing/formatter paths. We expect code near event+4.
-          print('\n### HALFWORD LOADS NEAR EVENT BUFFER USERS')
-          for s,e,name in [(0x96CC,0x9810,'A'),(0x9E24,0x9F80,'B'),(0xB470,0xB530,'selector'),(0xDBB0,0xDC80,'formatter')]:
-              print('##',name)
-              for i in dis(s,e):
-                  if i.mnemonic.startswith('ldrh') or i.mnemonic.startswith('strh'):
-                      print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
+          # Event byte2 helpers tell us allowed channel indices and per-channel tables.
+          dump(0x7F80,0x8060,'EVENT CHANNEL RESET/ACCESS 7Fxx')
+          dump(0x8A1C,0x8A48,'EVENT[2] -> MAPPING 8A1C')
+
+          # LAN selector: every access to object +0x4D in B controller/state machine.
+          print('\n### B OBJECT +0x4D ACCESSES')
+          for i in allins:
+              if 0x08009900<=i.address<=0x0800A100 and ('#0x4d]' in i.op_str.lower() or '#0x4d' in i.op_str.lower()):
+                  print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
+                  o=i.address-B; dump(max(0,o-20),min(len(d),o+36),f'+4D CONTEXT {i.address:08X}')
+
+          dump(0xBAA0,0xBC40,'LAN SEND / UDP FUNCTIONS INCLUDING BB08')
+
+          # Decode literals in BB08 and neighbors to strings/RAM.
+          print('\n### LAN PC LITERAL LOADS')
+          for i in dis(0xBAA0,0xBC40):
+              if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
+                  m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
+                  if not m: continue
+                  imm=int(m.group(1),0) if m.group(1) else 0
+                  la=((i.address+4)&~3)+imm
+                  if B<=la<=B+len(d)-4:
+                      v=u32(la); s=cstr(v)
+                      print(f'{i.address:08X}: lit {la:08X}={v:08X}'+(f' -> {s!r}' if s else ''))
+
+          # Event code relationship: code is event+4. Show exact state3 reset sites with offsets.
+          dump(0x97BC,0x97DA,'A TREG RESET SITE')
+          dump(0x9F24,0x9F48,'B TREG RESET SITE')
           PY
