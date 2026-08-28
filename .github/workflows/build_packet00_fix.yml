@@ -1,4 +1,4 @@
-name: Analyze MA193 GPRS Socket Mapping
+name: Analyze MA193 GPRS Failover Semantics
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prove socket zero maps IP PORT and socket one maps IP2 PORT2
+      - name: Verify state2 failover and packet00 safe routing plan
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -28,7 +28,7 @@ jobs:
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
           def u32(a): return struct.unpack_from('<I',d,a-B)[0]
-          def cstr(a,n=100):
+          def cstr(a,n=120):
               o=a-B; out=[]
               if not 0<=o<len(d): return None
               for x in d[o:o+n]:
@@ -40,28 +40,25 @@ jobs:
               for i in dis(s,e):
                   if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
                       m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                      if m:
-                          im=int(m.group(1),0) if m.group(1) else 0; la=((i.address+4)&~3)+im
-                          if B<=la<=B+len(d)-4:
-                              v=u32(la); print(f'LIT {i.address:08X} @{la:08X}={v:08X}',repr(cstr(v)))
+                      if not m: continue
+                      im=int(m.group(1),0) if m.group(1) else 0; la=((i.address+4)&~3)+im
+                      if B<=la<=B+len(d)-4:
+                          v=u32(la); print(f'LIT {i.address:08X} @{la:08X}={v:08X}',repr(cstr(v)))
 
-          dump(0xA180,0xA2B0,'GPRS SOCKET OPEN CONFIG')
-          lits(0xA180,0xA2B0)
-          dump(0xB330,0xB3C0,'GPRS SOCKET OPEN HELPER B358')
-          lits(0xB330,0xB3C0)
+          dump(0xAE70,0xAFA0,'AEC0 ACK/RESPONSE HELPER AREA')
+          lits(0xAE70,0xAFA0)
+          dump(0xB400,0xB4C8,'GPRS RESPONSE PARSER / SEND STATUS')
+          lits(0xB400,0xB4C8)
+          dump(0x96CC,0x9812,'FULL GPRS EVENT STATE MACHINE')
 
-          # exact refs to selector table and nearby contexts
-          addr=0x20003D82; pat=struct.pack('<I',addr); pos=0; refs=[]
-          while True:
-              q=d.find(pat,pos)
-              if q<0: break
-              refs.append(B+q); pos=q+1
-          print('\nSELECTOR_TABLE_REFS',[f'{x:08X}' for x in refs])
-          for r in refs: dump(max(0,r-B-28),min(len(d),r-B+24),f'REF {r:08X}')
+          # Search calls to selector toggle and response helper only.
+          allins=dis(0x100,len(d))
+          for t in (0x0800AEC0,0x0800B4C8,0x0800B4E0,0x08008DEC):
+              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
+              print(f'CALLERS {t:08X}',[f'{x:08X}' for x in hs])
 
-          # startup RAM zeroing ranges: dump reset init functions around calls to memset and RAM end literals
-          dump(0x3900,0x3C20,'MAIN STARTUP AROUND INIT')
-          lits(0x3900,0x3C20)
-
-          print('\nSELECTOR_ADDR',hex(addr))
+          # Confirm code locations to patch: route selector fetch, post-send skip, TREG reset.
+          print('\nPATCH_BYTES_ROUTE',d[0x9730:0x973A].hex(' '))
+          print('PATCH_BYTES_POSTSEND',d[0x9754:0x9766].hex(' '))
+          print('PATCH_BYTES_TREG',d[0x97C0:0x97D2].hex(' '))
           PY
