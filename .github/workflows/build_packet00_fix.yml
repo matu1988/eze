@@ -1,4 +1,4 @@
-name: Analyze MA193 Packet00 Core
+name: Analyze MA193 Routing State
 
 on:
   push:
@@ -13,122 +13,72 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Focused Packet00 analysis
+      - name: Map native routes and Packet00 side effects
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib, struct, re
+          import struct,re
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
-          old=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          md.skipdata=True
-
-          print('META size=%d sha256=%s sp=%08X reset=%08X' % (
-              len(d), hashlib.sha256(d).hexdigest(),
-              struct.unpack_from('<I',d,0)[0], struct.unpack_from('<I',d,4)[0]))
-
-          def insns(s,e):
-              s=max(0,s&~1); e=min(len(d),e)
-              return list(md.disasm(d[s:e],B+s))
-
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
+          def insns(s,e): return list(md.disasm(d[s:e],B+s))
           def dump(s,e,title):
               print('\n### '+title)
-              for i in insns(s,e):
-                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+              for i in insns(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          def u32(off): return struct.unpack_from('<I',d,off)[0]
+          def astr(off,maxlen=80):
+              if not (0<=off<len(d)): return None
+              out=[]
+              for b in d[off:off+maxlen]:
+                  if b==0: break
+                  if b<32 or b>126: return None
+                  out.append(chr(b))
+              return ''.join(out) if out else None
 
-          def same(s,e):
-              n=min(e,len(d),len(old))
-              return d[s:n]==old[s:n]
+          print('### CONFIG/NETWORK STRINGS')
+          for m in re.finditer(rb'[ -~]{3,}',d):
+              off=m.start(); s=m.group().decode('ascii','replace')
+              if 0xE000 <= off <= 0x10500 and len(s)<=80:
+                  print(f'{B+off:08X}: {s}')
+          print('\n### DOTTED/IP-LIKE STRINGS')
+          for m in re.finditer(rb'(?:\d{1,3}\.){3}\d{1,3}',d):
+              print(f'{B+m.start():08X}: {m.group().decode()}')
 
-          # Confirm/reject all historical core offsets against pristine 193.
-          regions=[
-              (0x3D50,0x3D60,'clock'),
-              (0x3E0C,0x3E32,'deadline'),
-              (0x7380,0x7420,'TREG init'),
-              (0x7610,0x7630,'TREG getter'),
-              (0x8CD0,0x8D70,'Packet00 generator'),
-              (0x96D0,0x9740,'state path A'),
-              (0x9E20,0x9EA0,'state path B'),
-              (0xB4B0,0xB520,'route/send candidate'),
-          ]
-          print('\n### CORE RANGE EQUALITY 193 vs old196')
-          for s,e,name in regions:
-              print(f'{name}: {same(s,e)} 193sha={hashlib.sha256(d[s:min(e,len(d))]).hexdigest()[:16]}')
+          print('\n### POINTER TABLE AROUND TREG REFERENCE')
+          for off in range(0xF400,0xF4C0,4):
+              v=u32(off)
+              s=astr(v-B) if B<=v<B+len(d) else None
+              print(f'{B+off:08X}: {v:08X}'+(f' -> {s}' if s else ''))
 
-          # TREG string and literal references.
-          print('\n### TREG STRINGS / POINTERS')
-          for key in (b'TREG',b'REG',b'TEST',b'ABON',b'IMEI'):
-              offs=[m.start() for m in re.finditer(re.escape(key),d)]
-              print(key.decode('ascii','ignore'), [f'{B+x:08X}' for x in offs])
-              for o in offs:
-                  ptr=struct.pack('<I',B+o)
-                  refs=[]; p=0
-                  while True:
-                      q=d.find(ptr,p)
-                      if q<0: break
-                      refs.append(q); p=q+1
-                  if refs: print(' ptrrefs',f'{B+o:08X}',[f'{B+x:08X}' for x in refs])
+          dump(0x8D5C,0x8DF0,'PACKET00 RELATED HELPERS AFTER GENERATOR')
+          dump(0x96CC,0x9820,'STATE MACHINE A COMPLETE')
+          dump(0x9E24,0x9F40,'STATE MACHINE B COMPLETE')
+          dump(0xA860,0xA9C0,'TRANSPORT/ROUTE FUNCTION 0x0800A8A8')
+          dump(0xBAD0,0xBC20,'TRANSPORT FUNCTION 0x0800BB08')
+          dump(0xBD40,0xBE30,'STATE/TRANSPORT FUNCTION 0x0800BD78')
+          dump(0xB4C8,0xB500,'SELECTOR FUNCTIONS B4C8/B4E0')
+          dump(0xDBB0,0xDCA0,'PACKET TYPE 3030/5063 SPECIAL HANDLING')
 
-          # Find all actual Thumb instructions containing 3030/5063 in core by disassembling windows every 2 bytes.
-          # We only print unique plausible instruction addresses.
-          print('\n### IMMEDIATE 0x3030 / 0x5063 INSTRUCTIONS')
-          found={}
-          for off in range(0x100,len(d)-4,2):
-              xs=list(md.disasm(d[off:off+4],B+off,1))
-              if not xs: continue
-              i=xs[0]
-              txt=(i.mnemonic+' '+i.op_str).lower()
-              if '0x3030' in txt or '0x5063' in txt:
-                  found[i.address]=(i.mnemonic,i.op_str,i.bytes.hex(' '))
-          for a,(m,o,b) in sorted(found.items()):
-              print(f'{a:08X}: {b:14} {m:8} {o}')
+          print('\n### SELECTOR LITERALS')
+          for off in (0xB4DC,0xB4E8,0xB4F8,0xB4FC):
+              if off+4<=len(d): print(f'{B+off:08X}: {u32(off):08X}')
 
-          # Full verified core dumps.
-          dump(0x3D50,0x3D60,'CLOCK SOURCE')
-          dump(0x3E0C,0x3E34,'DEADLINE HELPER')
-          dump(0x7360,0x7420,'TREG LOAD/CONVERSION')
-          dump(0x7600,0x7640,'TREG GETTER AREA')
-          dump(0x8CC0,0x8D70,'PACKET00 GENERATOR FULL')
-          dump(0x96C0,0x9750,'PACKET00 STATE PATH A')
-          dump(0x9E20,0x9EB0,'PACKET00 STATE PATH B')
-          dump(0xB470,0xB540,'ROUTE / SEND AREA')
-
-          # Discover calls to important functions, using verified historical addresses only if their ranges matched.
-          targets=[0x08003D50,0x08003E0C,0x08007620,0x08008CE0,0x08004548,0x0800B4C8,0x0800B4E0]
-          print('\n### CALL SITES TO CORE TARGETS')
+          print('\n### FUNCTION CALLERS')
           allins=insns(0x100,len(d))
-          for t in targets:
+          for t in (0x0800A8A8,0x0800BB08,0x0800BD78,0x0800B4C8,0x0800B4E0,0x08008D5C,0x08008D88):
               hits=[]
               for i in allins:
-                  if i.mnemonic in ('bl','blx'):
-                      op=i.op_str.lower().replace('#','')
-                      if op==hex(t): hits.append(i.address)
-              print(f'{t:08X}:',[f'{x:08X}' for x in hits])
+                  if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t): hits.append(i.address)
+              print(f'{t:08X}: {[f"{x:08X}" for x in hits]}')
 
-          # Dump context of every call to Packet00 generator found above.
-          packet_calls=[]
-          for i in allins:
-              if i.mnemonic=='bl' and i.op_str.lower().replace('#','')==hex(0x08008CE0):
-                  packet_calls.append(i.address)
-          for a in packet_calls:
-              off=a-B
-              dump(off-28,off+44,f'CALLER CONTEXT {a:08X} -> 08008CE0')
-
-          # Identify every write/read of historical TREG global 0x20003BFC by searching literal value.
-          print('\n### LITERAL 0x20003BFC REFERENCES')
-          lit=struct.pack('<I',0x20003BFC)
-          p=0; refs=[]
-          while True:
-              q=d.find(lit,p)
-              if q<0: break
-              refs.append(q); p=q+1
-          print([f'{B+x:08X}' for x in refs])
-          for q in refs:
-              dump(q-40,q+24,f'AROUND TREG GLOBAL LITERAL {B+q:08X}')
-
+          # Decode literal pools used by A and B state machines as raw words.
+          for start,end,title in [(0x9810,0x9840,'A literal pool'),(0x9F88,0x9FC0,'B literal pool'),(0xA980,0xA9C0,'A8A8 literal pool'),(0xBC00,0xBC30,'BB08 literal pool'),(0xBE00,0xBE30,'BD78 literal pool')]:
+              print('\n### '+title)
+              for off in range(start,end,4):
+                  if off+4<=len(d):
+                      v=u32(off); s=astr(v-B) if B<=v<B+len(d) else None
+                      print(f'{B+off:08X}: {v:08X}'+(f' -> {s}' if s else ''))
           PY
