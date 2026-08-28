@@ -1,4 +1,4 @@
-name: Analyze MA193 Routing State
+name: Analyze MA193 IP Parameters
 
 on:
   push:
@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Map native routes and Packet00 side effects
+      - name: Trace IP PORT IP2 PORT2 consumers
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import struct,re
+          import struct
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
@@ -28,57 +28,55 @@ jobs:
           def dump(s,e,title):
               print('\n### '+title)
               for i in insns(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          def u32(off): return struct.unpack_from('<I',d,off)[0]
-          def astr(off,maxlen=80):
-              if not (0<=off<len(d)): return None
-              out=[]
-              for b in d[off:off+maxlen]:
-                  if b==0: break
-                  if b<32 or b>126: return None
-                  out.append(chr(b))
-              return ''.join(out) if out else None
 
-          print('### CONFIG/NETWORK STRINGS')
-          for m in re.finditer(rb'[ -~]{3,}',d):
-              off=m.start(); s=m.group().decode('ascii','replace')
-              if 0xE000 <= off <= 0x10500 and len(s)<=80:
-                  print(f'{B+off:08X}: {s}')
-          print('\n### DOTTED/IP-LIKE STRINGS')
-          for m in re.finditer(rb'(?:\d{1,3}\.){3}\d{1,3}',d):
-              print(f'{B+m.start():08X}: {m.group().decode()}')
-
-          print('\n### POINTER TABLE AROUND TREG REFERENCE')
-          for off in range(0xF400,0xF4C0,4):
-              v=u32(off)
-              s=astr(v-B) if B<=v<B+len(d) else None
-              print(f'{B+off:08X}: {v:08X}'+(f' -> {s}' if s else ''))
-
-          dump(0x8D5C,0x8DF0,'PACKET00 RELATED HELPERS AFTER GENERATOR')
-          dump(0x96CC,0x9820,'STATE MACHINE A COMPLETE')
-          dump(0x9E24,0x9F40,'STATE MACHINE B COMPLETE')
-          dump(0xA860,0xA9C0,'TRANSPORT/ROUTE FUNCTION 0x0800A8A8')
-          dump(0xBAD0,0xBC20,'TRANSPORT FUNCTION 0x0800BB08')
-          dump(0xBD40,0xBE30,'STATE/TRANSPORT FUNCTION 0x0800BD78')
-          dump(0xB4C8,0xB500,'SELECTOR FUNCTIONS B4C8/B4E0')
-          dump(0xDBB0,0xDCA0,'PACKET TYPE 3030/5063 SPECIAL HANDLING')
-
-          print('\n### SELECTOR LITERALS')
-          for off in (0xB4DC,0xB4E8,0xB4F8,0xB4FC):
-              if off+4<=len(d): print(f'{B+off:08X}: {u32(off):08X}')
-
-          print('\n### FUNCTION CALLERS')
           allins=insns(0x100,len(d))
-          for t in (0x0800A8A8,0x0800BB08,0x0800BD78,0x0800B4C8,0x0800B4E0,0x08008D5C,0x08008D88):
-              hits=[]
-              for i in allins:
-                  if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t): hits.append(i.address)
-              print(f'{t:08X}: {[f"{x:08X}" for x in hits]}')
+          # Locate 0x7B4C config lookup calls and infer r0 immediate from preceding instructions.
+          print('### CONFIG LOOKUP CALLS FOR IDS 16..19')
+          for idx,i in enumerate(allins):
+              if i.mnemonic=='bl' and i.op_str.lower().replace('#','')==hex(0x08007B4C):
+                  prev=allins[max(0,idx-8):idx]
+                  idv=None
+                  for p in reversed(prev):
+                      if p.mnemonic in ('movs','mov') and p.op_str.startswith('r0,'):
+                          op=p.op_str.split(',',1)[1].strip().replace('#','')
+                          try: idv=int(op,0)
+                          except: pass
+                          break
+                  if idv in (16,17,18,19):
+                      print(f'call={i.address:08X} id={idv}')
+                      off=i.address-B
+                      dump(max(0,off-36),min(len(d),off+64),f'PARAM {idv} CONTEXT')
 
-          # Decode literal pools used by A and B state machines as raw words.
-          for start,end,title in [(0x9810,0x9840,'A literal pool'),(0x9F88,0x9FC0,'B literal pool'),(0xA980,0xA9C0,'A8A8 literal pool'),(0xBC00,0xBC30,'BB08 literal pool'),(0xBE00,0xBE30,'BD78 literal pool')]:
-              print('\n### '+title)
-              for off in range(start,end,4):
-                  if off+4<=len(d):
-                      v=u32(off); s=astr(v-B) if B<=v<B+len(d) else None
-                      print(f'{B+off:08X}: {v:08X}'+(f' -> {s}' if s else ''))
+          # Direct raw refs to key/default strings.
+          print('\n### POINTER REFS TO IP KEYS / DEFAULTS')
+          items={
+              'IP_key':0x0800F61B,'PORT_key':0x0800F64F,'IP2_key':0x0800F61E,'PORT2_key':0x0800F654,
+              'default_ip_a':0x0800F593,'default_ip_b':0x0800F5A2,'default_port':0x0800F5B1,
+              'sendudp1':0x0800FC87,'sendudp3':0x0800FC91,
+          }
+          for name,addr in items.items():
+              pat=struct.pack('<I',addr); refs=[]; p=0
+              while True:
+                  q=d.find(pat,p)
+                  if q<0: break
+                  refs.append(B+q); p=q+1
+              print(name,hex(addr),[f'{x:08X}' for x in refs])
+
+          print('\n### EXACT BYTES/STRINGS AROUND B4EC CHOICE')
+          for off in range(0xFCA0,0xFCB8):
+              print(f'{B+off:08X}: {d[off]:02X} {chr(d[off]) if 32<=d[off]<=126 else "."}')
+
+          dump(0xB4EC,0xB500,'B4EC CHOICE')
+          dump(0xDC48,0xDDA0,'PACKET FORMATTER DC48 COMPLETE')
+
+          # Find immediate call contexts around transport/network setup functions where keys 16-19 are likely used.
+          # Also show every reference to table addresses 0xF474..0xF480.
+          print('\n### TABLE ENTRY ADDRESS REFS (F474..F480)')
+          for addr in (0x0800F474,0x0800F478,0x0800F47C,0x0800F480):
+              pat=struct.pack('<I',addr); refs=[]; p=0
+              while True:
+                  q=d.find(pat,p)
+                  if q<0: break
+                  refs.append(B+q); p=q+1
+              print(f'{addr:08X}: {[f"{x:08X}" for x in refs]}')
           PY
