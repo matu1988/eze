@@ -1,4 +1,4 @@
-name: Trace Timer Clock Unit
+name: Build Packet00 Dual Path TREG V5
 
 on:
   push:
@@ -6,24 +6,158 @@ on:
       - '.github/workflows/build_packet00_fix.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  diagnose:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump clock source
+      - name: Patch both original Packet00 paths
         shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine
           python - <<'PY'
           from pathlib import Path
+          import hashlib
+          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes(); B=0x08000000
+
+          BASE=0x08000000
+          SRC=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin')
+          OUT=Path('MA_196-GE-AR_PACKET00_IP1_TREG_DUALPATH_V5.bin')
+          src=SRC.read_bytes()
+          assert len(src)==69096, len(src)
+          assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
+          d=bytearray(src)
+
+          # Original Packet00 generator calls in the two state machines.
+          assert d[0x9714:0x9718] == bytes.fromhex('FF F7 E4 FA')
+          assert d[0x9E6C:0x9E70] == bytes.fromhex('FE F7 38 FF')
+          # Existing Packet00 routing stub: equal 0x3030 currently calls original selector.
+          assert d[0x10DE0:0x10DE4] == bytes.fromhex('FA F7 7E FB')
+
+          ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          wrapper_off=len(d)
+          wrapper_addr=BASE+wrapper_off
+
+          # Both original calls now use the same wrapper/deadline.
+          for off in (0x9714,0x9E6C):
+              hook,_=ks.asm(f'bl 0x{wrapper_addr:08x}', addr=BASE+off, as_bytes=True)
+              hook=bytes(hook)
+              assert len(hook)==4
+              d[off:off+4]=hook
+
+          # Force Packet00 route 0/IP1 in ME=1 instead of reading the alternating selector.
+          d[0x10DE0:0x10DE4] = bytes.fromhex('00 20 00 BF')  # movs r0,#0 ; nop
+
+          # Shared custom state:
+          # 0x200043B4 marker, 0x200043B8 deadline (seconds).
+          # For ME=1, ignore each path's local +0x48/+0x3C timer and use the shared deadline.
+          # If expired, call the ORIGINAL 0x08008CE0 with the shared expired deadline so it
+          # constructs Packet00 directly in the active packet structure. Clear the shared
+          # deadline only after 0x08008CE0 reports success. ME!=1 uses the untouched local timer.
+          asm='''
+              push {r3,r4,r5,r6,r7,lr}
+              mov r4, r0
+              mov r5, r1
+              mov r6, r2
+              mov r7, r3
+
+              bl 0x08010b3e
+              cmp r0, #1
+              bne original_path
+
+              cmp r7, #0
+              beq disable_test
+
+              movw r2, #0x43b4
+              movt r2, #0x2000
+              ldr r1, [r2]
+              movw r0, #0x5354
+              movt r0, #0x3354
+              cmp r1, r0
+              beq state_ready
+              str r0, [r2]
+              movs r1, #0
+              str r1, [r2, #4]
+
+          state_ready:
+              movw r0, #0x43b8
+              movt r0, #0x2000
+              mov r1, r7
+              bl 0x08003e0c
+              cbz r0, no_fire
+
+              mov r0, r4
+              mov r1, r5
+              movw r2, #0x43b8
+              movt r2, #0x2000
+              mov r3, r7
+              bl 0x08008ce0
+              cbz r0, return_now
+
+              mov r5, r0
+              movw r0, #0x43b8
+              movt r0, #0x2000
+              movs r1, #0
+              str r1, [r0]
+              mov r0, r5
+              b return_now
+
+          no_fire:
+              movs r0, #0
+              b return_now
+
+          original_path:
+              mov r0, r4
+              mov r1, r5
+              mov r2, r6
+              mov r3, r7
+              bl 0x08008ce0
+              b return_now
+
+          disable_test:
+              movw r0, #0x43b4
+              movt r0, #0x2000
+              movs r1, #0
+              str r1, [r0]
+              str r1, [r0, #4]
+              movs r0, #0
+
+          return_now:
+              pop {r3,r4,r5,r6,r7,pc}
+          '''
+          wrapper,_=ks.asm(asm, addr=wrapper_addr, as_bytes=True)
+          wrapper=bytes(wrapper)
+          d.extend(wrapper)
+          OUT.write_bytes(d)
+
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          for s,e,title in [(0x3D30,0x3D80,'clock source around 0x3D50'),(0x140,0x190,'possible divisor helper')]:
-              print(f'\n===== {title} =====')
-              for i in md.disasm(d[s:e],B+s):
-                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('SOURCE_SIZE',len(src))
+          print('OUTPUT_SIZE',len(d))
+          print('WRAPPER_ADDR',hex(wrapper_addr),'SIZE',len(wrapper))
+          print('SHA256',hashlib.sha256(d).hexdigest())
+          print('HOOK_A',d[0x9714:0x9718].hex(' '))
+          print('HOOK_B',d[0x9E6C:0x9E70].hex(' '))
+          print('ROUTE_3030',d[0x10DE0:0x10DE4].hex(' '))
+          print('--- wrapper ---')
+          for i in md.disasm(wrapper,wrapper_addr):
+              print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
           PY
+
+      - name: Commit firmware
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add MA_196-GE-AR_PACKET00_IP1_TREG_DUALPATH_V5.bin
+          git commit -m "Add Packet00 dual-path TREG V5" || true
+          git push
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: MA_196_PACKET00_TREG_DUALPATH_V5
+          path: MA_196-GE-AR_PACKET00_IP1_TREG_DUALPATH_V5.bin
+          if-no-files-found: error
