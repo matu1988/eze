@@ -1,4 +1,4 @@
-name: Analyze MA193 Native Single Destination
+name: Analyze MA193 Final Native Map
 
 on:
   push:
@@ -13,64 +13,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace LAN selector and event cleanup semantics
+      - name: Close native LAN routing and inspect old additions only forensically
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import re,struct
+          import hashlib,struct,re
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
-          d=Path('MA_193-GE-AR.bin').read_bytes()
+          p=Path('MA_193-GE-AR.bin'); d=p.read_bytes()
+          m=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
-          def dis(s,e): return list(md.disasm(d[s:e],B+s))
-          def dump(s,e,title):
+          def dis(buf,s,e): return list(md.disasm(buf[s:e],B+s))
+          def dump(buf,s,e,title):
               print('\n### '+title)
-              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
-          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
-          def lits(s,e,title):
-              print('\n### LITERALS '+title)
-              for i in dis(s,e):
-                  if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
-                      m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                      if not m: continue
-                      imm=int(m.group(1),0) if m.group(1) else 0
-                      la=((i.address+4)&~3)+imm
-                      if B<=la<=B+len(d)-4: print(f'{i.address:08X}: {la:08X}={u32(la):08X}')
+              for i in dis(buf,s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
+          def u32(buf,addr): return struct.unpack_from('<I',buf,addr-B)[0]
+          all193=dis(d,0x100,len(d))
 
-          dump(0x9A80,0x9C20,'LAN OBJECT INITIALIZATION')
-          lits(0x9A80,0x9C20,'LAN OBJECT INITIALIZATION')
-          dump(0xBD30,0xBE20,'LAN STATE HELPERS BD4C BDA8 BD78')
-          lits(0xBD30,0xBE20,'LAN STATE HELPERS')
-          dump(0x8DC0,0x8E90,'EVENT CLEANUP 8DEC COMPLETE')
-          lits(0x8DC0,0x8E90,'EVENT CLEANUP')
-
-          print('\n### CALLERS OF BD4C/BDA8/BD78/8DEC')
-          allins=dis(0x100,len(d))
-          for t in (0x0800BD4C,0x0800BDA8,0x0800BD78,0x08008DEC):
-              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
-              print(f'{t:08X}: {[f"{x:08X}" for x in hs]}')
+          print('### LAN SELECTOR INITIALIZER B894 + CALLERS')
+          dump(d,0xB830,0xB8C0,'B7C4/B8xx LAN INITIALIZATION')
+          for t in (0x0800B7C4,0x0800B894,0x0800BDA8):
+              hs=[i.address for i in all193 if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
+              print(f'{t:08X} callers={[f"{x:08X}" for x in hs]}')
               for a in hs:
-                  o=a-B; dump(max(0,o-24),min(len(d),o+40),f'CALL {a:08X}->{t:08X}')
+                  o=a-B;dump(d,max(0,o-20),min(len(d),o+30),f'CALLER {a:08X}')
 
-          # Find all exact accesses to object-relative +0x4D in whole image, not only B controller.
-          print('\n### ALL TRUE +/- 4D FIELD ACCESSES')
-          for off in range(0x100,len(d)-4,2):
-              xs=list(md.disasm(d[off:off+4],B+off,1))
-              if not xs: continue
-              i=xs[0]
-              if i.mnemonic.startswith(('ldr','str')) and '#0x4d]' in i.op_str.lower():
+          # decode functions surrounding B894 to infer selector values / IP parameters
+          dump(d,0xB7C0,0xB940,'LAN NETWORK CONFIG OBJECT SETUP')
+          dump(d,0xBAC0,0xBD40,'LAN SENDUDP1/2/3 FAMILY')
+
+          print('\n### 193 5063 OCCURRENCES + CONTEXT')
+          for off in range(0,len(d)-2):
+              if d[off:off+2]==bytes.fromhex('63 50'):
+                  print(f'raw {B+off:08X}')
+                  dump(d,max(0,(off-36)&~1),min(len(d),off+52),f'5063 CTX {B+off:08X}')
+
+          print('\n### OLD196 APPENDED AREA (FORENSIC ONLY)')
+          print('193_size',len(d),'old196_size',len(m),'old196_sha',hashlib.sha256(m).hexdigest())
+          if len(m)>len(d): dump(m,len(d)&~1,len(m),'APPENDED OLD196 CODE/DATA')
+
+          # compact diff ranges only in original 193 address space
+          print('\n### OLD196 PATCH RANGES INSIDE ORIGINAL 193 (FORENSIC ONLY)')
+          ranges=[];st=None
+          for i in range(len(d)):
+              diff=d[i]!=m[i]
+              if diff and st is None: st=i
+              if not diff and st is not None:
+                  ranges.append((st,i));st=None
+          if st is not None:ranges.append((st,len(d)))
+          for a,b in ranges:
+              if b-a<=24:
+                  print(f'{B+a:08X}-{B+b-1:08X} len={b-a} 193={d[a:b].hex(" ")} 196={m[a:b].hex(" ")}')
+              else:
+                  print(f'{B+a:08X}-{B+b-1:08X} len={b-a}')
+
+          # Search old196 appended disassembly for key calls/constants: 5063, 3030, 60 sec, 86400 sec, get config ids 16-19.
+          print('\n### OLD196 APPENDED KEY INSTRUCTIONS')
+          for i in dis(m,len(d)&~1,len(m)):
+              txt=(i.mnemonic+' '+i.op_str).lower()
+              if any(k in txt for k in ('0x5063','0x3030','0x15180','0x3c','0x10','#0x12','#0x13')) or i.op_str.lower().replace('#','') in (hex(0x08003e0c),hex(0x080082a8),hex(0x08010b3e)):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
-
-          # Raw word/byte initialization around B object RAM is not in binary; find literal refs to B base.
-          bbase=0x20003D08
-          pat=struct.pack('<I',bbase);pos=0;refs=[]
-          while True:
-              q=d.find(pat,pos)
-              if q<0: break
-              refs.append(B+q);pos=q+1
-          print('B_BASE_LITERAL_REFS',[f'{x:08X}' for x in refs])
-          for r in refs:
-              o=r-B;dump(max(0,o-48),min(len(d),o+32),f'AROUND B BASE LITERAL {r:08X}')
           PY
