@@ -32,7 +32,6 @@ jobs:
           def asm(s,a):
               enc,_=ks.asm(s,addr=a); return bytes(enc)
 
-          # Rebuild the exact hardware-validated TEST4 first.
           golden=bytearray(src)
           tfix=B+len(golden)
           tfix_code=asm('''
@@ -73,25 +72,18 @@ jobs:
           assert gsha=='7df8498e95e73df5a89f2a1d8989257bbcf279157e63e50ea73075482bc2d91b',gsha
           print('GOLDEN_TEST4_SHA256',gsha)
 
-          # Common invariants from the known-booting default helper layer.
           assert golden[0x10b24:0x10b29]==b'ME\x001\x00'
-          assert golden[0x10b29:0x10b38]==b'54.232.115.106'
+          assert golden[0x10b29:0x10b38]==b'54.232.115.106\x00'
           assert golden[0x10b38:0x10b3d]==b'7050\x00'
-          assert golden[0xf5a2:0xf5b1]==b'24.232.246.134'
+          assert golden[0xf5a2:0xf5b1]==b'24.232.246.134\x00'
           assert golden[0xf5b1:0xf5b7]==b'20000\x00'
-          # Existing default-IP helper: ID16 and ID18 both select new IP.
           assert golden[0x10b96:0x10ba6]==bytes.fromhex('10 28 01 d0 12 28 01 d1 73 48 70 47 6c 48 70 47')
-          # Existing default-port helper: ID17 and ID19 both select 7050.
           assert golden[0x10ba6:0x10bb6]==bytes.fromhex('11 28 01 d0 13 28 01 d1 70 48 70 47 6b 48 70 47')
 
-          # Variant ME=1: default ME 1.
-          # IP config ID16 -> original 24.232.246.134; ID18 -> 54.232.115.106.
-          # PORT config ID17 -> original 20000; ID19 -> 7050.
           me1=bytearray(golden)
           me1[0x10b98:0x10b9a]=asm('beq 0x08010ba2',B+0x10b98)
           me1[0x10ba8:0x10baa]=asm('beq 0x08010bb2',B+0x10ba8)
           assert me1[0x10b27]==ord('1')
-          # Decode branch targets as a guard.
           i=list(md.disasm(bytes(me1[0x10b98:0x10b9a]),B+0x10b98))[0]
           j=list(md.disasm(bytes(me1[0x10ba8:0x10baa]),B+0x10ba8))[0]
           print('ME1_IP1_BRANCH',i.mnemonic,i.op_str)
@@ -100,15 +92,13 @@ jobs:
           n1='MA_196-GE-AR_DEFAULT_ME1_IP1_24.232.246.134_P20000_IP2_54.232.115.106_P7050.bin'
           Path(n1).write_bytes(me1)
 
-          # Variant ME=2: both IP1/IP2 and ports use the new server; only default ME changes to 2.
           me2=bytearray(golden)
           me2[0x10b27]=ord('2')
-          assert me2[0x10b29:0x10b38]==b'54.232.115.106'
+          assert me2[0x10b29:0x10b38]==b'54.232.115.106\x00'
           assert me2[0x10b38:0x10b3d]==b'7050\x00'
           n2='MA_196-GE-AR_DEFAULT_ME2_IP1_54.232.115.106_P7050_IP2_54.232.115.106_P7050.bin'
           Path(n2).write_bytes(me2)
 
-          # Ensure only intended existing bytes differ from golden.
           d1=[i for i,(a,b) in enumerate(zip(golden,me1)) if a!=b]
           d2=[i for i,(a,b) in enumerate(zip(golden,me2)) if a!=b]
           print('ME1_DIFFS',[hex(x) for x in d1])
