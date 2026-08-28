@@ -1,4 +1,4 @@
-name: Build MA193 Packet00 IP1 Boot Safe Test2
+name: Analyze Known-Booting MA196 Versus MA193 GPRS
 
 on:
   push:
@@ -9,99 +9,47 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build validated boot-safe two-hook patch
+      - name: Compare GPRS state machine and helper semantics
         shell: bash
         run: |
-          python -m pip install --quiet capstone keystone-engine
+          python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           import hashlib
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
-          from keystone import Ks,KS_ARCH_ARM,KS_MODE_THUMB,KS_MODE_LITTLE_ENDIAN
           B=0x08000000
-          original=Path('MA_193-GE-AR.bin').read_bytes()
-          assert len(original)==68388
-          git_blob=hashlib.sha1(b'blob '+str(len(original)).encode()+b'\0'+original).hexdigest()
-          assert git_blob=='6cb97de270e186233d189e13e4056fcbbb0b106f'
-          assert original[0x9736:0x973A] == bytes.fromhex('01 f0 d3 fe')
-          assert original[0x9754:0x9766] == bytes.fromhex('45 f2 63 03 62 8b 9a 42 01 d1 03 23 01 e0 2b 78 01 33')
-          # State3/TREG block MUST remain byte-identical to stock 193 in TEST2.
-          state3=bytes.fromhex('03 7e 16 34 01 2b 08 bf 00 23 4f f0 02 01 08 bf 83 64')
-          assert original[0x97C0:0x97D2] == state3
-
-          ks=Ks(KS_ARCH_ARM,KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
-          def asm(text,addr):
-              enc,_=ks.asm(text,addr=addr); return bytes(enc)
-          def align4(x): return (x+3)&~3
-
-          route_addr=B+len(original)
-          route_code=asm('''
-              ldrh r1, [r0, #4]
-              movw r2, #0x3030
-              cmp r1, r2
-              bne normal_route
-              movs r0, #0
-              bx lr
-            normal_route:
-              b.w 0x0800B4E0
-          ''',route_addr)
-
-          post_addr=align4(route_addr+len(route_code))
-          post_code=asm('''
-              ldrh r2, [r4, #0x1a]
-              movw r3, #0x5063
-              cmp r2, r3
-              beq single_dest
-              movw r3, #0x3030
-              cmp r2, r3
-              beq single_dest
-              ldrb r3, [r5]
-              adds r3, #1
-              bx lr
-            single_dest:
-              movs r3, #3
-              bx lr
-          ''',post_addr)
-
-          out=bytearray(original)
-          out.extend(route_code)
-          while len(out)<post_addr-B: out.append(0)
-          out.extend(post_code)
-          while len(out)%4: out.append(0)
-
-          out[0x9736:0x973A]=asm(f'bl 0x{route_addr:08X}',B+0x9736)
-          out[0x9754:0x9766]=asm(f'bl 0x{post_addr:08X}',B+0x9754)+bytes.fromhex('00 bf')*7
-
-          allowed=set(range(0x9736,0x973A)) | set(range(0x9754,0x9766))
-          diffs=[i for i,(a,b) in enumerate(zip(original,out[:len(original)])) if a!=b]
-          assert diffs and all(i in allowed for i in diffs)
-          assert out[0x97C0:0x97D2] == state3
-          assert out[0x9706:0x9718] == original[0x9706:0x9718]
-          assert out[0x9E24:0x9FA8] == original[0x9E24:0x9FA8]
-          assert out[:0x100] == original[:0x100]
-
-          for off,target in ((0x9736,route_addr),(0x9754,post_addr)):
-              ins=list(md.disasm(bytes(out[off:off+4]),B+off))[0]
-              print('HOOK',hex(B+off),ins.mnemonic,ins.op_str)
-              assert ins.mnemonic=='bl' and int(ins.op_str.replace('#',''),16)==target
-
-          name='MA_193-GE-AR_PACKET00_IP1_BOOTSAFE_TEST2.bin'
-          Path(name).write_bytes(out)
-          print('BASE_GIT_BLOB',git_blob)
-          print('BASE_SIZE',len(original))
-          print('OUT_SIZE',len(out))
-          print('OUT_SHA256',hashlib.sha256(out).hexdigest())
-          print('DIFF_COUNT_IN_ORIGINAL_RANGE',len(diffs))
-          print('STATE3_97C0_UNTOUCHED',out[0x97C0:0x97D2].hex(' '))
-          print('ROUTE_ADDR',hex(route_addr),'POST_ADDR',hex(post_addr))
+          o=Path('MA_193-GE-AR.bin').read_bytes()
+          k=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
+          print('193',len(o),hashlib.sha256(o).hexdigest())
+          print('KNOWN_BOOT',len(k),hashlib.sha256(k).hexdigest())
+          print('\nDIFFS IN GPRS 0x96CC-0x9812')
+          diffs=[i for i in range(0x96cc,0x9812) if o[i]!=k[i]]
+          print('count',len(diffs))
+          if diffs:
+            # group contiguous
+            groups=[]; s=p=diffs[0]
+            for x in diffs[1:]:
+              if x==p+1:p=x
+              else:groups.append((s,p+1));s=p=x
+            groups.append((s,p+1))
+            for a,b in groups:
+              print(hex(B+a),hex(B+b), '193',o[a:b].hex(' '),'known',k[a:b].hex(' '))
+          print('\n193 STATE MACHINE')
+          for i in md.disasm(o[0x96cc:0x9812],B+0x96cc): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('\nKNOWN STATE MACHINE')
+          for i in md.disasm(k[0x96cc:0x9812],B+0x96cc): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('\nB4C8-B500 193')
+          for i in md.disasm(o[0xb4c8:0xb500],B+0xb4c8): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('\nB4C8-B500 known')
+          for i in md.disasm(k[0xb4c8:0xb500],B+0xb4c8): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          # Compare all original-range differences and whether known build already hooks 9736/9754
+          all_d=[i for i in range(len(o)) if o[i]!=k[i]]
+          print('\nTOTAL_DIFF_ORIGINAL_RANGE',len(all_d))
+          for off in (0x9706,0x9714,0x9730,0x9736,0x9754,0x97c0,0xb4c8,0xb4e0):
+            print(hex(B+off),'193',o[off:off+24].hex(' '),'known',k[off:off+24].hex(' '))
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: MA193_PACKET00_IP1_BOOTSAFE_TEST2
-          path: MA_193-GE-AR_PACKET00_IP1_BOOTSAFE_TEST2.bin
-          if-no-files-found: error
