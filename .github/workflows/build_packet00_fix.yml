@@ -1,4 +1,4 @@
-name: Map MA193 Default Network and ME Configuration
+name: Trace ME Default and Network Getters
 
 on:
   push:
@@ -13,48 +13,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Locate ME IP PORT IP2 PORT2 defaults
+      - name: Decode ME and default network helper paths
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import re,struct
+          import struct
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
-          files=['MA_193-GE-AR.bin','MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin']
-          for fn in files:
-              d=Path(fn).read_bytes()
-              print('\n###',fn,'SIZE',len(d))
-              # all IP-like ASCII strings and port-looking strings
-              for m in re.finditer(rb'(?<![0-9])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9])',d):
-                  print('IPSTR',hex(m.start()),hex(B+m.start()),m.group().decode())
-              for needle in [b'20000',b'7050',b'177.71.166.146',b'24.232.246.134',b'54.232.115.106',b'ME',b'IP2',b'PORT2',b'PORT',b'TREG']:
-                  p=0;hits=[]
+          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
+          for s,e,name in [
+             (0x79e0,0x7b20,'CONFIG GETTERS 79E0-7B20'),
+             (0x7d30,0x7df0,'DEFAULT STRING GETTERS 7D30-7DF0'),
+             (0x10b24,0x10bc0,'APPENDED ME/NETWORK HELPERS'),
+          ]:
+              print('\n###',name)
+              for i in md.disasm(d[s:e],B+s):
+                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          print('\nDATA 10B24-10B90',d[0x10b24:0x10b90].hex(' '))
+          print('ASCII segments')
+          import re
+          for m in re.finditer(rb'[ -~]{2,}',d[0x10b24:0x10b90]): print(hex(0x10b24+m.start()),repr(m.group().decode()))
+          # Find all literal refs to 0x0800F526 and nearby candidate bytes/halfwords.
+          for val in [B+0xf526,B+0xf524,B+0xf528,0xf526,0x02,0x00]:
+              if val>0xff:
+                  pat=struct.pack('<I',val); hits=[];p=0
                   while True:
-                      q=d.find(needle,p)
+                      q=d.find(pat,p)
                       if q<0:break
-                      hits.append((hex(q),hex(B+q)))
-                      p=q+1
-                  print('HITS',needle,hits)
-              # printable strings around config data region
-              print('\nASCII 0xF300-0xF800')
-              for m in re.finditer(rb'[ -~]{2,}',d[0xf300:0xf800]):
-                  s=m.group().decode(errors='replace')
-                  print(hex(0xf300+m.start()),repr(s))
-              print('\nHEX 0xF430-0xF550')
-              for off in range(0xf430,0xf550,16):
-                  print(f'{off:05x}:',d[off:off+16].hex(' '))
-              # references to known IP string addresses and nearby defaults
-              for ip in [b'177.71.166.146',b'24.232.246.134']:
-                  q=d.find(ip)
-                  if q>=0:
-                      addr=B+q
-                      pat=struct.pack('<I',addr)
-                      refs=[];p=0
-                      while True:
-                          x=d.find(pat,p)
-                          if x<0:break
-                          refs.append(hex(B+x));p=x+1
-                      print('REFS_TO',ip.decode(),hex(addr),refs)
+                      hits.append(hex(B+q));p=q+1
+                  print('REF',hex(val),hits)
+          # print nearby pointer table entries and interpret as little-endian words
+          print('\nWORDS F480-F540')
+          for off in range(0xf480,0xf540,4):
+              v=struct.unpack_from('<I',d,off)[0]
+              print(hex(B+off),hex(v))
+          # Search references to appended "ME" key address 0x8010b24
+          pat=struct.pack('<I',B+0x10b24); hits=[];p=0
+          while True:
+              q=d.find(pat,p)
+              if q<0:break
+              hits.append(hex(B+q));p=q+1
+          print('REFS_ME_KEY',hits)
           PY
