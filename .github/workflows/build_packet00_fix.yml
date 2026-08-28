@@ -31,17 +31,13 @@ jobs:
           assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
           d=bytearray(src)
 
-          # Known original calls.
           assert d[0x9714:0x9718] == bytes.fromhex('FF F7 E4 FA')
           assert d[0x9E6C:0x9E70] == bytes.fromhex('FE F7 38 FF')
-          # IMEI tick calls get_me at 0x10C26.
           assert d[0x10C26:0x10C2A] == bytes.fromhex('FF F7 8A FF')
-          # Existing Packet00 route stub calls original selector at 0x10DE0.
           assert d[0x10DE0:0x10DE4] == bytes.fromhex('FA F7 7E FB')
 
           ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
 
-          # 1) Safe ME cache wrapper: called exactly where original IMEI tick already calls get_me.
           cache_off=len(d)
           cache_addr=BASE+cache_off
           cache_asm='''
@@ -60,12 +56,10 @@ jobs:
           if len(d)&1:
               d.append(0)
 
-          # Patch IMEI tick get_me call to cache wrapper. Return value remains ME in r0.
           hook,_=ks.asm(f'bl 0x{cache_addr:08x}', addr=BASE+0x10C26, as_bytes=True)
           hook=bytes(hook); assert len(hook)==4
           d[0x10C26:0x10C2A]=hook
 
-          # 2) Boot-safe Packet00 wrapper. It NEVER calls get_me.
           wrap_off=len(d)
           wrap_addr=BASE+wrap_off
           wrap_asm='''
@@ -74,8 +68,6 @@ jobs:
               mov r5, r1
               mov r6, r2
               mov r7, r3
-
-              ; Use cached ME only if marker is valid. Otherwise preserve original behavior.
               movw r2, #0x43bc
               movt r2, #0x2000
               ldr r0, [r2, #4]
@@ -85,11 +77,8 @@ jobs:
               ldrb r0, [r2]
               cmp r0, #1
               bne original_path
-
               cmp r7, #0
               beq disable_test
-
-              ; Independent shared Packet00 timer marker/deadline at B4/B8.
               movw r2, #0x43b4
               movt r2, #0x2000
               ldr r1, [r2]
@@ -100,15 +89,12 @@ jobs:
               str r0, [r2]
               movs r1, #0
               str r1, [r2, #4]
-
           state_ready:
               movw r0, #0x43b8
               movt r0, #0x2000
               mov r1, r7
               bl 0x08003e0c
               cbz r0, no_fire
-
-              ; Generate Packet00 through the original generator on whichever native path is active.
               mov r0, r4
               mov r1, r5
               movw r2, #0x43b8
@@ -116,7 +102,6 @@ jobs:
               mov r3, r7
               bl 0x08008ce0
               cbz r0, return_now
-
               mov r5, r0
               movw r0, #0x43b8
               movt r0, #0x2000
@@ -124,11 +109,9 @@ jobs:
               str r1, [r0]
               mov r0, r5
               b return_now
-
           no_fire:
               movs r0, #0
               b return_now
-
           original_path:
               mov r0, r4
               mov r1, r5
@@ -136,7 +119,6 @@ jobs:
               mov r3, r7
               bl 0x08008ce0
               b return_now
-
           disable_test:
               movw r0, #0x43b4
               movt r0, #0x2000
@@ -144,7 +126,6 @@ jobs:
               str r1, [r0]
               str r1, [r0, #4]
               movs r0, #0
-
           return_now:
               pop {r3,r4,r5,r6,r7,pc}
           '''
@@ -152,13 +133,11 @@ jobs:
           wrapper=bytes(wrapper)
           d.extend(wrapper)
 
-          # Patch both native Packet00 calls to the boot-safe wrapper.
           for off in (0x9714,0x9E6C):
               h,_=ks.asm(f'bl 0x{wrap_addr:08x}', addr=BASE+off, as_bytes=True)
               h=bytes(h); assert len(h)==4
               d[off:off+4]=h
 
-          # Force 3030 route 0 / IP1 in ME1 routing stub.
           d[0x10DE0:0x10DE4]=bytes.fromhex('00 20 00 BF')
 
           OUT.write_bytes(d)
