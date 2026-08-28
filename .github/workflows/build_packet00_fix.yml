@@ -1,4 +1,4 @@
-name: Analyze MA193 Status Ownership
+name: Analyze MA193 Event Buffer Semantics
 
 on:
   push:
@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve field 18, state setter and native reset semantics
+      - name: Map event buffer layout, channel values and native TREG reset
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import struct,re
+          import re,struct
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
@@ -27,67 +27,46 @@ jobs:
           def dis(s,e): return list(md.disasm(d[s:e],B+s))
           def dump(s,e,title):
               print('\n### '+title)
-              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
-          def cstr(addr,n=96):
-              off=addr-B
-              if not (0<=off<len(d)): return None
-              out=[]
-              for x in d[off:off+n]:
-                  if x==0: break
-                  if not 32<=x<=126: return None
-                  out.append(chr(x))
-              return ''.join(out) if out else None
+              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
           allins=dis(0x100,len(d))
 
-          dump(0x98B0,0x9960,'ROUTINE WRITING COMM OBJECT +0x18')
-          # identify containing function by nearest pushes/returns and callers of likely starts
-          print('\n### CALLS INTO 0x98xx ROUTINES')
-          for t in range(0x08009880,0x08009950,2):
-              hits=[]
-              for i in allins:
-                  if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t): hits.append(i.address)
-              if hits: print(f'{t:08X}: {[f"{x:08X}" for x in hits]}')
+          dump(0x80F0,0x8320,'EVENT CONSTRUCTOR 8178 + GENERIC INJECTOR 82A8')
+          dump(0x8A00,0x8C80,'EVENT CHANNEL HELPERS')
+          dump(0x8CE0,0x8D58,'PACKET00 GENERATOR')
 
-          dump(0x9140,0x91D8,'FUNCTION 0x08009148 COMPLETE')
-          print('\n### 9148 LITERAL POOL / DECODE')
-          for addr in range(0x080091A0,0x080091D8,4):
-              if addr+4<=B+len(d):
-                  v=u32(addr); s=cstr(v)
-                  print(f'{addr:08X}: {v:08X}'+(f' -> {s!r}' if s else ''))
+          print('\n### ALL CALLS TO GENERIC INJECTOR 0x080082A8 WITH PRECEDING ARGUMENT SETUP')
+          calls=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x080082A8)]
+          print([f'{x:08X}' for x in calls])
+          for a in calls:
+              off=a-B; dump(max(0,off-34),min(len(d),off+18),f'82A8 CALL {a:08X}')
 
-          # Decode all PC literal loads in 9148.
-          print('\n### 9148 PC LITERAL LOADS')
-          for i in dis(0x9148,0x91C8):
-              if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
-                  m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                  if m:
-                      imm=int(m.group(1),0) if m.group(1) else 0
-                      la=((i.address+4)&~3)+imm
-                      if B<=la<=B+len(d)-4:
-                          v=u32(la); s=cstr(v)
-                          print(f'{i.address:08X}: {i.mnemonic} {i.op_str} => {la:08X}={v:08X}'+(f' -> {s!r}' if s else ''))
+          print('\n### ALL CALLS TO NATIVE CONSTRUCTOR 0x08008178')
+          calls=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08008178)]
+          print([f'{x:08X}' for x in calls])
+          for a in calls:
+              off=a-B; dump(max(0,off-34),min(len(d),off+18),f'8178 CALL {a:08X}')
 
-          # Identify setters/readers of the concrete +0x18 object locations, based on A/B bases.
-          # A base 0x20003C7C => status byte 0x20003C94. B base 0x20003D08 => 0x20003D20.
-          print('\n### RAW LITERAL REFS TO A/B STATUS ADDRESSES')
-          for addr,name in [(0x20003C94,'A+18'),(0x20003D20,'B+18')]:
-              pat=struct.pack('<I',addr); pos=0; refs=[]
-              while True:
-                  q=d.find(pat,pos)
-                  if q<0: break
-                  refs.append(B+q);pos=q+1
-              print(name,f'{addr:08X}',[f'{x:08X}' for x in refs])
+          # Search robustly from each aligned halfword for single instructions that write byte offset 2 or load event code offsets 4/6.
+          print('\n### SINGLE-INSTRUCTION SCAN FOR EVENT BUFFER BYTE +2 WRITES')
+          seen=set()
+          for off in range(0x7000,min(len(d),0xE500),2):
+              xs=list(md.disasm(d[off:off+4],B+off,1))
+              if not xs: continue
+              i=xs[0]; op=i.op_str.lower()
+              if i.mnemonic.startswith('strb') and ('#2]' in op or '#0x2]' in op):
+                  key=(i.address,i.bytes)
+                  if key not in seen:
+                      seen.add(key); print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
 
-          # Calls to the 98xx writer once function start is visible; also contexts around callers.
-          for target in (0x080098D8,0x080098DC,0x080098E0,0x080098E4,0x080098E8,0x080098EC):
-              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(target)]
-              if hs:
-                  print(f'candidate writer {target:08X} callers {[f"{x:08X}" for x in hs]}')
-                  for a in hs:
-                      off=a-B; dump(max(0,off-28),min(len(d),off+40),f'CALLER {a:08X}')
+          print('\n### STATE3 BUFFER RELATION PROOF')
+          dump(0x96CC,0x97DC,'A FROM OBJECT BASE TO EVENT BUFFER/TIMER RESET')
+          dump(0x9E24,0x9F48,'B FROM OBJECT BASE TO EVENT BUFFER/TIMER RESET')
 
-          # Native state3 exact conditions with surrounding object pointer setup.
-          dump(0x9790,0x97F0,'A STATE3 EXACT TREG CLEAR CONDITION')
-          dump(0x9F08,0x9F60,'B STATE3 EXACT TREG CLEAR CONDITION')
+          # Identify event code loads in send/routing/formatter paths. We expect code near event+4.
+          print('\n### HALFWORD LOADS NEAR EVENT BUFFER USERS')
+          for s,e,name in [(0x96CC,0x9810,'A'),(0x9E24,0x9F80,'B'),(0xB470,0xB530,'selector'),(0xDBB0,0xDC80,'formatter')]:
+              print('##',name)
+              for i in dis(s,e):
+                  if i.mnemonic.startswith('ldrh') or i.mnemonic.startswith('strh'):
+                      print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
           PY
