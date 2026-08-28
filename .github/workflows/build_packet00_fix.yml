@@ -1,4 +1,4 @@
-name: Analyze MA193 Dual Server Lifecycle
+name: Analyze MA193 Native Single Destination
 
 on:
   push:
@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Decode GPRS and LAN dual-server event lifecycle
+      - name: Trace LAN selector and event cleanup semantics
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import re
+          import re,struct
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
@@ -28,39 +28,49 @@ jobs:
           def dump(s,e,title):
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
+          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
+          def lits(s,e,title):
+              print('\n### LITERALS '+title)
+              for i in dis(s,e):
+                  if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
+                      m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
+                      if not m: continue
+                      imm=int(m.group(1),0) if m.group(1) else 0
+                      la=((i.address+4)&~3)+imm
+                      if B<=la<=B+len(d)-4: print(f'{i.address:08X}: {la:08X}={u32(la):08X}')
 
-          dump(0x96CC,0x9820,'GPRS STATE MACHINE A ALL STATES')
-          dump(0x9E24,0x9FA8,'LAN STATE MACHINE B ALL STATES')
-          dump(0xA850,0xA940,'GPRS SEND A8A8')
-          dump(0xB4C0,0xB500,'GPRS SERVER SELECTOR B4C8/B4E0')
+          dump(0x9A80,0x9C20,'LAN OBJECT INITIALIZATION')
+          lits(0x9A80,0x9C20,'LAN OBJECT INITIALIZATION')
+          dump(0xBD30,0xBE20,'LAN STATE HELPERS BD4C BDA8 BD78')
+          lits(0xBD30,0xBE20,'LAN STATE HELPERS')
+          dump(0x8DC0,0x8E90,'EVENT CLEANUP 8DEC COMPLETE')
+          lits(0x8DC0,0x8E90,'EVENT CLEANUP')
 
-          print('\n### REAL STRB/STORE ACCESSES TO B OBJECT +0x4D')
-          seen=set()
-          for off in range(0x9300,0xA100,2):
+          print('\n### CALLERS OF BD4C/BDA8/BD78/8DEC')
+          allins=dis(0x100,len(d))
+          for t in (0x0800BD4C,0x0800BDA8,0x0800BD78,0x08008DEC):
+              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
+              print(f'{t:08X}: {[f"{x:08X}" for x in hs]}')
+              for a in hs:
+                  o=a-B; dump(max(0,o-24),min(len(d),o+40),f'CALL {a:08X}->{t:08X}')
+
+          # Find all exact accesses to object-relative +0x4D in whole image, not only B controller.
+          print('\n### ALL TRUE +/- 4D FIELD ACCESSES')
+          for off in range(0x100,len(d)-4,2):
               xs=list(md.disasm(d[off:off+4],B+off,1))
               if not xs: continue
               i=xs[0]
-              if i.address in seen: continue
-              op=i.op_str.lower()
-              if i.mnemonic.startswith(('strb','ldrb')) and '#0x4d]' in op:
-                  seen.add(i.address)
+              if i.mnemonic.startswith(('ldr','str')) and '#0x4d]' in i.op_str.lower():
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
-                  o=i.address-B;dump(max(0,o-20),min(len(d),o+36),f'B+4D ACCESS {i.address:08X}')
 
-          # Also find stores to offset +0x4c..+0x4f in B object neighborhood to catch wide encodings.
-          print('\n### B OBJECT NEAR DESTINATION FIELDS 4C-4F')
-          for off in range(0x9300,0xA100,2):
-              xs=list(md.disasm(d[off:off+4],B+off,1))
-              if not xs:continue
-              i=xs[0];op=i.op_str.lower()
-              if i.mnemonic.startswith(('str','ldr')) and any(f'#0x{x:x}]' in op for x in range(0x4c,0x50)):
-                  print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
-
-          # Calls to BB08 and BBFC with contexts show how selector changes across states.
-          allins=dis(0x100,len(d))
-          for t in (0x0800BB08,0x0800BBFC,0x0800B4C8,0x0800B4E0,0x0800A8A8):
-              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
-              print(f'\nCALLERS {t:08X}: {[f"{x:08X}" for x in hs]}')
-              for a in hs:
-                  o=a-B;dump(max(0,o-24),min(len(d),o+36),f'CALL {a:08X}->{t:08X}')
+          # Raw word/byte initialization around B object RAM is not in binary; find literal refs to B base.
+          bbase=0x20003D08
+          pat=struct.pack('<I',bbase);pos=0;refs=[]
+          while True:
+              q=d.find(pat,pos)
+              if q<0: break
+              refs.append(B+q);pos=q+1
+          print('B_BASE_LITERAL_REFS',[f'{x:08X}' for x in refs])
+          for r in refs:
+              o=r-B;dump(max(0,o-48),min(len(d),o+32),f'AROUND B BASE LITERAL {r:08X}')
           PY
