@@ -1,4 +1,4 @@
-name: Analyze MA193 IP Parameters
+name: Analyze MA193 Interfaces and States
 
 on:
   push:
@@ -13,70 +13,92 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace IP PORT IP2 PORT2 consumers
+      - name: Prove interfaces, state dispatch and timer resets
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import struct
+          import struct,re
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
-          def insns(s,e): return list(md.disasm(d[s:e],B+s))
+          def dis(s,e): return list(md.disasm(d[s:e],B+s))
           def dump(s,e,title):
               print('\n### '+title)
-              for i in insns(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-
-          allins=insns(0x100,len(d))
-          # Locate 0x7B4C config lookup calls and infer r0 immediate from preceding instructions.
-          print('### CONFIG LOOKUP CALLS FOR IDS 16..19')
-          for idx,i in enumerate(allins):
-              if i.mnemonic=='bl' and i.op_str.lower().replace('#','')==hex(0x08007B4C):
-                  prev=allins[max(0,idx-8):idx]
-                  idv=None
-                  for p in reversed(prev):
-                      if p.mnemonic in ('movs','mov') and p.op_str.startswith('r0,'):
-                          op=p.op_str.split(',',1)[1].strip().replace('#','')
-                          try: idv=int(op,0)
-                          except: pass
-                          break
-                  if idv in (16,17,18,19):
-                      print(f'call={i.address:08X} id={idv}')
-                      off=i.address-B
-                      dump(max(0,off-36),min(len(d),off+64),f'PARAM {idv} CONTEXT')
-
-          # Direct raw refs to key/default strings.
-          print('\n### POINTER REFS TO IP KEYS / DEFAULTS')
-          items={
-              'IP_key':0x0800F61B,'PORT_key':0x0800F64F,'IP2_key':0x0800F61E,'PORT2_key':0x0800F654,
-              'default_ip_a':0x0800F593,'default_ip_b':0x0800F5A2,'default_port':0x0800F5B1,
-              'sendudp1':0x0800FC87,'sendudp3':0x0800FC91,
-          }
-          for name,addr in items.items():
-              pat=struct.pack('<I',addr); refs=[]; p=0
+              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          def u32off(off): return struct.unpack_from('<I',d,off)[0]
+          def cstr(addr,maxn=96):
+              off=addr-B
+              if off<0 or off>=len(d): return None
+              out=[]
+              for x in d[off:off+maxn]:
+                  if x==0: break
+                  if not (32<=x<=126): return None
+                  out.append(chr(x))
+              return ''.join(out) if out else None
+          def ptrrefs(addr):
+              pat=struct.pack('<I',addr); out=[]; pos=0
               while True:
-                  q=d.find(pat,p)
+                  q=d.find(pat,pos)
                   if q<0: break
-                  refs.append(B+q); p=q+1
-              print(name,hex(addr),[f'{x:08X}' for x in refs])
+                  out.append(B+q); pos=q+1
+              return out
+          def literal_report(s,e,title):
+              print('\n### LITERALS '+title)
+              for i in dis(s,e):
+                  if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
+                      m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
+                      if not m: continue
+                      imm=int(m.group(1),0) if m.group(1) else 0
+                      lit=((i.address+4)&~3)+imm
+                      if B<=lit<=B+len(d)-4:
+                          v=u32off(lit-B); s0=cstr(v)
+                          tail=f' -> {s0!r}' if s0 else ''
+                          print(f'{i.address:08X} {i.mnemonic} {i.op_str} | lit={lit:08X} val={v:08X}{tail}')
 
-          print('\n### EXACT BYTES/STRINGS AROUND B4EC CHOICE')
-          for off in range(0xFCA0,0xFCB8):
-              print(f'{B+off:08X}: {d[off]:02X} {chr(d[off]) if 32<=d[off]<=126 else "."}')
+          print('### TBB STATE DISPATCH DECODE')
+          # TBB base is PC=instruction+4, table begins there.
+          for ins_addr,count,name in [(0x080096D8,5,'A'),(0x08009E30,5,'B')]:
+              table=ins_addr+4
+              vals=d[table-B:table-B+count]
+              print(name,'table',f'{table:08X}','bytes',vals.hex(' '))
+              for idx,v in enumerate(vals): print(f'{name} state {idx} -> {table+2*v:08X} (offset byte 0x{v:02X})')
 
-          dump(0xB4EC,0xB500,'B4EC CHOICE')
-          dump(0xDC48,0xDDA0,'PACKET FORMATTER DC48 COMPLETE')
+          print('\n### CALLERS OF STATE MACHINES / TRANSPORTS')
+          allins=dis(0x100,len(d))
+          for t in (0x080096CC,0x08009E24,0x0800A8A8,0x0800BB08,0x08008DEC,0x08007FD4,0x0800B4C8,0x0800B4E0):
+              hits=[]
+              for i in allins:
+                  if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t): hits.append(i.address)
+              print(f'{t:08X}: {[f"{x:08X}" for x in hits]}')
+              for a in hits[:8]: dump(max(0,a-B-20),min(len(d),a-B+24),f'caller {a:08X} -> {t:08X}')
 
-          # Find immediate call contexts around transport/network setup functions where keys 16-19 are likely used.
-          # Also show every reference to table addresses 0xF474..0xF480.
-          print('\n### TABLE ENTRY ADDRESS REFS (F474..F480)')
-          for addr in (0x0800F474,0x0800F478,0x0800F47C,0x0800F480):
-              pat=struct.pack('<I',addr); refs=[]; p=0
-              while True:
-                  q=d.find(pat,p)
-                  if q<0: break
-                  refs.append(B+q); p=q+1
-              print(f'{addr:08X}: {[f"{x:08X}" for x in refs]}')
+          print('\n### POINTER REFS TO INTERFACE / SEND LABEL STRINGS')
+          strs={'Gprs':0x0800F3E8,'Lan':0x0800F3ED,'SENDUDP1':0x0800FC87,'SENDUDP3':0x0800FC91,
+                'IP':0x0800F61B,'PORT':0x0800F64F,'IP2':0x0800F61E,'PORT2':0x0800F654}
+          for name,a in strs.items():
+              refs=ptrrefs(a); print(name,f'{a:08X}',[f'{x:08X}' for x in refs])
+              for r in refs:
+                  dump(max(0,r-B-24),min(len(d),r-B+24),f'around pointer ref {name} {r:08X}')
+
+          dump(0x7D60,0x7DE0,'DEFAULT NETWORK CONFIG INIT')
+          literal_report(0x7D60,0x7DE0,'DEFAULT NETWORK CONFIG INIT')
+
+          literal_report(0xA8A8,0xA954,'TRANSPORT A A8A8')
+          literal_report(0xBB08,0xBBD8,'TRANSPORT B BB08')
+          literal_report(0xBBFC,0xBCA8,'NEIGHBOR UDP TRANSPORT')
+
+          dump(0x7F90,0x8060,'CHANNEL RESET / 7FD4 AREA')
+          dump(0x8DEC,0x8E50,'EVENT QUEUE CLEANUP / 8DEC AREA')
+          literal_report(0x8DEC,0x8E50,'8DEC AREA')
+
+          # Search all accesses using immediate #0x18 and #0x48 in state-machine neighborhood.
+          print('\n### STRUCT FIELD #0x18 / #0x48 / #0x3C ACCESSES')
+          for i in allins:
+              op=i.op_str.lower()
+              if any(x in op for x in ('#0x18]','#0x48]','#0x3c]')):
+                  if 0x08008000 <= i.address <= 0x0800A500:
+                      print(f'{i.address:08X}: {i.mnemonic:8} {i.op_str}')
           PY
