@@ -1,4 +1,4 @@
-name: Analyze MA193 GPRS Minimal Patch
+name: Analyze MA193 GPRS Socket Mapping
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prove GPRS selector mapping and exact safe patch points
+      - name: Prove socket zero maps IP PORT and socket one maps IP2 PORT2
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -21,66 +21,47 @@ jobs:
           from pathlib import Path
           import struct,re
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
-          B=0x08000000
-          d=Path('MA_193-GE-AR.bin').read_bytes()
+          B=0x08000000; d=Path('MA_193-GE-AR.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
           def dis(s,e): return list(md.disasm(d[s:e],B+s))
           def dump(s,e,title):
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
-          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
-          def cstr(addr,n=120):
-              o=addr-B
-              if o<0 or o>=len(d): return None
-              out=[]
+          def u32(a): return struct.unpack_from('<I',d,a-B)[0]
+          def cstr(a,n=100):
+              o=a-B; out=[]
+              if not 0<=o<len(d): return None
               for x in d[o:o+n]:
                   if x==0: break
-                  if not 32<=x<=126: return None
+                  if not 32<=x<=126:return None
                   out.append(chr(x))
               return ''.join(out) if out else None
-          def literals(s,e,title):
-              print('\n### LITERALS '+title)
+          def lits(s,e):
               for i in dis(s,e):
                   if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
                       m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                      if not m: continue
-                      imm=int(m.group(1),0) if m.group(1) else 0
-                      la=((i.address+4)&~3)+imm
-                      if B<=la<=B+len(d)-4:
-                          v=u32(la); s2=cstr(v)
-                          print(f'{i.address:08X}: lit@{la:08X}={v:08X}'+(f' -> {s2!r}' if s2 else ''))
+                      if m:
+                          im=int(m.group(1),0) if m.group(1) else 0; la=((i.address+4)&~3)+im
+                          if B<=la<=B+len(d)-4:
+                              v=u32(la); print(f'LIT {i.address:08X} @{la:08X}={v:08X}',repr(cstr(v)))
 
-          dump(0xB4A0,0xB520,'GPRS selector toggle/read and endpoint mapper')
-          literals(0xB4A0,0xB520,'GPRS selector helpers')
-          dump(0xA7A0,0xA960,'GPRS send/open path')
-          literals(0xA7A0,0xA960,'GPRS send/open path')
-          dump(0x9640,0x9820,'GPRS controller incl state0-4 and timeout paths')
-          literals(0x9640,0x9820,'GPRS controller')
+          dump(0xA180,0xA2B0,'GPRS SOCKET OPEN CONFIG')
+          lits(0xA180,0xA2B0)
+          dump(0xB330,0xB3C0,'GPRS SOCKET OPEN HELPER B358')
+          lits(0xB330,0xB3C0)
 
-          # Parameter table indices 10,16,17,18,19 and every direct immediate use in code.
-          print('\n### PARAMETER NAME TABLE AROUND IP/PORT/IP2/PORT2/TREG')
-          for off in range(0xF000,min(len(d),0x10300)):
-              if d[off:off+3] in (b'IP\x00',b'IP2') or d[off:off+4] in (b'PORT',b'TREG'):
-                  print(hex(B+off), cstr(B+off))
-          print('\n### IMMEDIATE PARAM INDEX USES 10/16/17/18/19 NEAR CONFIG/COMM CODE')
-          for off in range(0x6000,0xD000,2):
-              xs=list(md.disasm(d[off:off+4],B+off,1))
-              if not xs: continue
-              i=xs[0]; txt=i.op_str.lower()
-              if i.mnemonic.startswith('mov') and any(x in txt for x in ('#0xa','#0x10','#0x11','#0x12','#0x13')):
-                  # print context only if followed soon by BL to config-looking 0x75xx/76xx/79xx
-                  near=dis(off,min(len(d),off+20))
-                  if any(j.mnemonic in ('bl','blx') and any(k in j.op_str.lower() for k in ('0x80075','0x80076','0x80079')) for j in near):
-                      dump(max(0,off-12),min(len(d),off+28),f'PARAM IMM CONTEXT {i.address:08X}')
+          # exact refs to selector table and nearby contexts
+          addr=0x20003D82; pat=struct.pack('<I',addr); pos=0; refs=[]
+          while True:
+              q=d.find(pat,pos)
+              if q<0: break
+              refs.append(B+q); pos=q+1
+          print('\nSELECTOR_TABLE_REFS',[f'{x:08X}' for x in refs])
+          for r in refs: dump(max(0,r-B-28),min(len(d),r-B+24),f'REF {r:08X}')
 
-          # Exact patch regions with raw bytes and instruction boundaries.
-          dump(0x974C,0x976A,'SINGLE DESTINATION DECISION EXACT')
-          dump(0x97B4,0x97DE,'TREG RESET DECISION EXACT')
-          print('\nRAW_SINGLE_DEST',d[0x9754:0x9766].hex(' '),len(d[0x9754:0x9766]))
-          print('RAW_TREG_RESET',d[0x97C0:0x97D2].hex(' '),len(d[0x97C0:0x97D2]))
+          # startup RAM zeroing ranges: dump reset init functions around calls to memset and RAM end literals
+          dump(0x3900,0x3C20,'MAIN STARTUP AROUND INIT')
+          lits(0x3900,0x3C20)
 
-          # Identify any unused FF/00 tail inside the image before append; report end metadata.
-          print('\n### IMAGE END')
-          print('size',len(d),'endaddr',hex(B+len(d)))
-          print('last64',d[-64:].hex(' '))
+          print('\nSELECTOR_ADDR',hex(addr))
           PY
