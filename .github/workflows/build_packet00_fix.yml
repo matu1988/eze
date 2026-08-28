@@ -1,4 +1,4 @@
-name: Analyze MA193 Event Lifecycle
+name: Analyze MA193 Status Ownership
 
 on:
   push:
@@ -13,76 +13,81 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Trace status field, queue lifecycle and timer reset causes
+      - name: Resolve field 18, state setter and native reset semantics
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import re,struct
+          import struct,re
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
           d=Path('MA_193-GE-AR.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
           def dis(s,e): return list(md.disasm(d[s:e],B+s))
-          def dump_addr(addr,pre=28,post=44,title=''):
-              off=addr-B; s=max(0,(off-pre)&~1); e=min(len(d),off+post)
-              print('\n### '+(title or f'CTX {addr:08X}'))
-              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
           def dump(s,e,title):
               print('\n### '+title)
               for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          def u32(addr): return struct.unpack_from('<I',d,addr-B)[0]
+          def cstr(addr,n=96):
+              off=addr-B
+              if not (0<=off<len(d)): return None
+              out=[]
+              for x in d[off:off+n]:
+                  if x==0: break
+                  if not 32<=x<=126: return None
+                  out.append(chr(x))
+              return ''.join(out) if out else None
           allins=dis(0x100,len(d))
 
-          print('### ALL MEMORY ACCESSES WITH +0x18 IN COMMUNICATION / EVENT CORE')
-          hits=[]
-          for i in allins:
-              if 0x08007E00 <= i.address <= 0x0800A100 and '#0x18]' in i.op_str.lower():
-                  hits.append(i.address)
-                  print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
-          for a in hits: dump_addr(a,30,50,f'+0x18 ACCESS {a:08X}')
+          dump(0x98B0,0x9960,'ROUTINE WRITING COMM OBJECT +0x18')
+          # identify containing function by nearest pushes/returns and callers of likely starts
+          print('\n### CALLS INTO 0x98xx ROUTINES')
+          for t in range(0x08009880,0x08009950,2):
+              hits=[]
+              for i in allins:
+                  if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t): hits.append(i.address)
+              if hits: print(f'{t:08X}: {[f"{x:08X}" for x in hits]}')
 
-          print('\n### ALL DIRECT STORES TO +0x18 ANYWHERE')
-          sh=[]
-          for i in allins:
-              op=i.op_str.lower()
-              if i.mnemonic.startswith('str') and '#0x18]' in op:
-                  sh.append(i.address); print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
-          for a in sh: dump_addr(a,36,52,f'+0x18 STORE {a:08X}')
+          dump(0x9140,0x91D8,'FUNCTION 0x08009148 COMPLETE')
+          print('\n### 9148 LITERAL POOL / DECODE')
+          for addr in range(0x080091A0,0x080091D8,4):
+              if addr+4<=B+len(d):
+                  v=u32(addr); s=cstr(v)
+                  print(f'{addr:08X}: {v:08X}'+(f' -> {s!r}' if s else ''))
 
-          print('\n### CALLERS 0x08009148')
-          calls=[]
-          for i in allins:
-              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08009148): calls.append(i.address)
-          print([f'{x:08X}' for x in calls])
-          for a in calls: dump_addr(a,18,24,f'CALL 9148 @ {a:08X}')
-          dump(0x90F0,0x9190,'FUNCTION 0x08009148 + NEIGHBORS')
+          # Decode all PC literal loads in 9148.
+          print('\n### 9148 PC LITERAL LOADS')
+          for i in dis(0x9148,0x91C8):
+              if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
+                  m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
+                  if m:
+                      imm=int(m.group(1),0) if m.group(1) else 0
+                      la=((i.address+4)&~3)+imm
+                      if B<=la<=B+len(d)-4:
+                          v=u32(la); s=cstr(v)
+                          print(f'{i.address:08X}: {i.mnemonic} {i.op_str} => {la:08X}={v:08X}'+(f' -> {s!r}' if s else ''))
 
-          print('\n### CALLERS 0x08008DEC')
-          calls=[]
-          for i in allins:
-              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08008DEC): calls.append(i.address)
-          print([f'{x:08X}' for x in calls])
-          for a in calls: dump_addr(a,22,30,f'CALL 8DEC @ {a:08X}')
-          dump(0x8DC0,0x8E70,'FUNCTION 0x08008DEC FULL')
+          # Identify setters/readers of the concrete +0x18 object locations, based on A/B bases.
+          # A base 0x20003C7C => status byte 0x20003C94. B base 0x20003D08 => 0x20003D20.
+          print('\n### RAW LITERAL REFS TO A/B STATUS ADDRESSES')
+          for addr,name in [(0x20003C94,'A+18'),(0x20003D20,'B+18')]:
+              pat=struct.pack('<I',addr); pos=0; refs=[]
+              while True:
+                  q=d.find(pat,pos)
+                  if q<0: break
+                  refs.append(B+q);pos=q+1
+              print(name,f'{addr:08X}',[f'{x:08X}' for x in refs])
 
-          print('\n### CALLERS / BODY OF 0x08007FD4 (EVENT RESET)')
-          calls=[]
-          for i in allins:
-              if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(0x08007FD4): calls.append(i.address)
-          print([f'{x:08X}' for x in calls])
-          for a in calls: dump_addr(a,18,24,f'CALL 7FD4 @ {a:08X}')
-          dump(0x7F80,0x8048,'FUNCTION 0x08007FD4 FULL')
+          # Calls to the 98xx writer once function start is visible; also contexts around callers.
+          for target in (0x080098D8,0x080098DC,0x080098E0,0x080098E4,0x080098E8,0x080098EC):
+              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(target)]
+              if hs:
+                  print(f'candidate writer {target:08X} callers {[f"{x:08X}" for x in hs]}')
+                  for a in hs:
+                      off=a-B; dump(max(0,off-28),min(len(d),off+40),f'CALLER {a:08X}')
 
-          # Event structure builders/copy/reset candidates around 0x8A00-0x91xx.
-          dump(0x8A00,0x8CE0,'EVENT CHANNEL / SELECTOR HELPERS BEFORE PACKET00')
-          dump(0x8F40,0x90F0,'EVENT CHANNEL STATE FUNCTIONS BEFORE 9148')
-
-          # Show all accesses to A +0x48 and B +0x3c and status +0x39 in state machine cores.
-          print('\n### TIMER / STATUS FIELD ACCESSES A+B')
-          for i in allins:
-              if 0x08009300 <= i.address <= 0x0800A000:
-                  op=i.op_str.lower()
-                  if any(k in op for k in ('#0x48]','#0x3c]','#0x39]','#0x38]')):
-                      print(f'{i.address:08X}: {i.mnemonic:9} {i.op_str}')
+          # Native state3 exact conditions with surrounding object pointer setup.
+          dump(0x9790,0x97F0,'A STATE3 EXACT TREG CLEAR CONDITION')
+          dump(0x9F08,0x9F60,'B STATE3 EXACT TREG CLEAR CONDITION')
           PY
