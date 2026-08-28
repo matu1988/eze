@@ -1,4 +1,4 @@
-name: Analyze MA193 GPRS Failover Semantics
+name: Build MA193 Clean GPRS Packet00 Test
 
 on:
   push:
@@ -9,56 +9,146 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify state2 failover and packet00 safe routing plan
+      - name: Build and validate minimal MA193 GPRS patch
         shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine
           python - <<'PY'
           from pathlib import Path
-          import struct,re
+          import hashlib, struct
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
-          B=0x08000000; d=Path('MA_193-GE-AR.bin').read_bytes()
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
-          def dis(s,e): return list(md.disasm(d[s:e],B+s))
-          def dump(s,e,title):
-              print('\n### '+title)
-              for i in dis(s,e): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:9} {i.op_str}')
-          def u32(a): return struct.unpack_from('<I',d,a-B)[0]
-          def cstr(a,n=120):
-              o=a-B; out=[]
-              if not 0<=o<len(d): return None
-              for x in d[o:o+n]:
-                  if x==0: break
-                  if not 32<=x<=126:return None
-                  out.append(chr(x))
-              return ''.join(out) if out else None
-          def lits(s,e):
-              for i in dis(s,e):
-                  if i.mnemonic.startswith('ldr') and '[pc' in i.op_str:
-                      m=re.search(r'\[pc(?:, #?(0x[0-9a-f]+|\d+))?\]',i.op_str.lower())
-                      if not m: continue
-                      im=int(m.group(1),0) if m.group(1) else 0; la=((i.address+4)&~3)+im
-                      if B<=la<=B+len(d)-4:
-                          v=u32(la); print(f'LIT {i.address:08X} @{la:08X}={v:08X}',repr(cstr(v)))
+          from keystone import Ks,KS_ARCH_ARM,KS_MODE_THUMB,KS_MODE_LITTLE_ENDIAN
 
-          dump(0xAE70,0xAFA0,'AEC0 ACK/RESPONSE HELPER AREA')
-          lits(0xAE70,0xAFA0)
-          dump(0xB400,0xB4C8,'GPRS RESPONSE PARSER / SEND STATUS')
-          lits(0xB400,0xB4C8)
-          dump(0x96CC,0x9812,'FULL GPRS EVENT STATE MACHINE')
+          B=0x08000000
+          src=Path('MA_193-GE-AR.bin')
+          original=src.read_bytes()
+          assert len(original)==68388, len(original)
+          git_blob=hashlib.sha1(b'blob '+str(len(original)).encode()+b'\0'+original).hexdigest()
+          assert git_blob=='6cb97de270e186233d189e13e4056fcbbb0b106f', git_blob
 
-          # Search calls to selector toggle and response helper only.
-          allins=dis(0x100,len(d))
-          for t in (0x0800AEC0,0x0800B4C8,0x0800B4E0,0x08008DEC):
-              hs=[i.address for i in allins if i.mnemonic in ('bl','blx') and i.op_str.lower().replace('#','')==hex(t)]
-              print(f'CALLERS {t:08X}',[f'{x:08X}' for x in hs])
+          # Exact original bytes at the three GPRS-only patch sites.
+          assert original[0x9736:0x973A] == bytes.fromhex('01 f0 d3 fe')
+          assert original[0x9754:0x9766] == bytes.fromhex('45 f2 63 03 62 8b 9a 42 01 d1 03 23 01 e0 2b 78 01 33')
+          assert original[0x97C0:0x97D2] == bytes.fromhex('03 7e 16 34 01 2b 08 bf 00 23 4f f0 02 01 08 bf 83 64')
+          # Native TREG generator remains untouched.
+          assert original[0x9706:0x9718] == bytes.fromhex('fd f7 8b ff 04 f1 48 02 03 46 01 21 38 46 ff f7 e4 fa')
 
-          # Confirm code locations to patch: route selector fetch, post-send skip, TREG reset.
-          print('\nPATCH_BYTES_ROUTE',d[0x9730:0x973A].hex(' '))
-          print('PATCH_BYTES_POSTSEND',d[0x9754:0x9766].hex(' '))
-          print('PATCH_BYTES_TREG',d[0x97C0:0x97D2].hex(' '))
+          ks=Ks(KS_ARCH_ARM,KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          md.skipdata=True
+          def asm(text,addr):
+              enc,_=ks.asm(text,addr=addr)
+              return bytes(enc)
+          def align4(x): return (x+3)&~3
+
+          # Append only small leaf helpers. No new RAM, no scheduler, no config calls.
+          route_addr=B+len(original)  # 0x08010B24, already aligned
+          route_code=asm('''
+              ldrh r1, [r0, #4]
+              movw r2, #0x3030
+              cmp r1, r2
+              bne normal_route
+              movs r0, #0
+              bx lr
+            normal_route:
+              b.w 0x0800B4E0
+          ''', route_addr)
+
+          post_addr=align4(route_addr+len(route_code))
+          post_code=asm('''
+              ldrh r2, [r4, #0x1a]
+              movw r3, #0x5063
+              cmp r2, r3
+              beq single_dest
+              movw r3, #0x3030
+              cmp r2, r3
+              beq single_dest
+              ldrb r3, [r5]
+              adds r3, #1
+              bx lr
+            single_dest:
+              movs r3, #3
+              bx lr
+          ''', post_addr)
+
+          treg_addr=align4(post_addr+len(post_code))
+          treg_code=asm('''
+              ldrh r2, [r0, #0x1a]
+              movw r3, #0x3030
+              cmp r2, r3
+              bne no_treg_reset
+              movs r3, #0
+              str r3, [r0, #0x48]
+            no_treg_reset:
+              adds r4, #0x16
+              movs r1, #2
+              bx lr
+          ''', treg_addr)
+
+          out=bytearray(original)
+          def ensure_addr(addr):
+              need=addr-B
+              if len(out)<need: out.extend(b'\x00'*(need-len(out)))
+          ensure_addr(route_addr); out.extend(route_code)
+          ensure_addr(post_addr); out.extend(post_code)
+          ensure_addr(treg_addr); out.extend(treg_code)
+          while len(out)%4: out.append(0)
+
+          # Hook 1: only Packet00 forces selector/socket 0 = IP/PORT (IP1).
+          bl=asm(f'bl 0x{route_addr:08X}',B+0x9736)
+          assert len(bl)==4
+          out[0x9736:0x973A]=bl
+
+          # Hook 2: after successful send, 5063 and 3030 both close immediately;
+          # ordinary events preserve the original state+1 behavior.
+          bl=asm(f'bl 0x{post_addr:08X}',B+0x9754)
+          assert len(bl)==4
+          out[0x9754:0x9766]=bl + bytes.fromhex('00 bf')*7
+
+          # Hook 3: clear native GPRS TREG deadline only after a real 3030.
+          bl=asm(f'bl 0x{treg_addr:08X}',B+0x97C0)
+          assert len(bl)==4
+          out[0x97C0:0x97D2]=bl + bytes.fromhex('00 bf')*7
+
+          # Strong diff validation: no original byte outside the three GPRS sites may change.
+          allowed=set(range(0x9736,0x973A)) | set(range(0x9754,0x9766)) | set(range(0x97C0,0x97D2))
+          diffs=[i for i,(a,b) in enumerate(zip(original,out[:len(original)])) if a!=b]
+          assert diffs and all(i in allowed for i in diffs)
+          assert out[0x9714:0x9718] == original[0x9714:0x9718]  # native Packet00 call
+          assert out[0x9E24:0x9FA8] == original[0x9E24:0x9FA8]  # LAN machine untouched
+          assert out[:0x100] == original[:0x100]                # vectors untouched
+
+          # Validate hooks disassemble as BL to the expected helpers.
+          def one(off,n=4):
+              xs=list(md.disasm(bytes(out[off:off+n]),B+off))
+              return xs[0] if xs else None
+          for off,target in ((0x9736,route_addr),(0x9754,post_addr),(0x97C0,treg_addr)):
+              ins=one(off)
+              print(f'HOOK {B+off:08X}: {ins.mnemonic} {ins.op_str}')
+              assert ins.mnemonic=='bl' and int(ins.op_str.replace('#',''),16)==target
+
+          # Print helper disassembly for audit.
+          for name,addr,code in [('ROUTE_3030_IP1',route_addr,route_code),('POSTSEND_SINGLE',post_addr,post_code),('TREG_3030_ONLY',treg_addr,treg_code)]:
+              print('\n'+name,hex(addr),'len',len(code))
+              for i in md.disasm(code,addr): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+
+          name='MA_193-GE-AR_PACKET00_IP1_TREG_INDEPENDIENTE_GPRS_TEST1.bin'
+          Path(name).write_bytes(out)
+          print('\nBASE_GIT_BLOB',git_blob)
+          print('BASE_SIZE',len(original))
+          print('OUT_SIZE',len(out))
+          print('OUT_SHA256',hashlib.sha256(out).hexdigest())
+          print('DIFF_COUNT_IN_ORIGINAL_RANGE',len(diffs))
+          print('DIFF_RANGES','9736-9739,9754-9765,97C0-97D1')
+          print('APPEND_START',hex(B+len(original)))
+          print('ROUTE_ADDR',hex(route_addr),'POST_ADDR',hex(post_addr),'TREG_ADDR',hex(treg_addr))
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MA193_PACKET00_IP1_TREG_GPRS_TEST1
+          path: MA_193-GE-AR_PACKET00_IP1_TREG_INDEPENDIENTE_GPRS_TEST1.bin
+          if-no-files-found: error
