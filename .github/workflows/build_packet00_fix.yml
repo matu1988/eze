@@ -1,4 +1,4 @@
-name: Inspect ME Network Helpers
+name: Build Golden TEST4 ME1 ME2 Defaults
 
 on:
   push:
@@ -9,27 +9,120 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Decode complete ME network helper and literals
+      - name: Rebuild golden TEST4 and create default variants
         shell: bash
         run: |
-          python -m pip install --quiet capstone
+          python -m pip install --quiet capstone keystone-engine
           python - <<'PY'
           from pathlib import Path
-          import struct
+          import hashlib
+          from keystone import Ks,KS_ARCH_ARM,KS_MODE_THUMB,KS_MODE_LITTLE_ENDIAN
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
+
           B=0x08000000
-          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
-          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.skipdata=True
-          for s,e in [(0x10b3e,0x10c22),(0x10d20,0x10da0)]:
-              print(f'\nDISASM {s:05x}-{e:05x}')
-              for i in md.disasm(d[s:e],B+s):
-                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          print('\nWORDS 10d20-10da0')
-          for off in range(0x10d20,0x10da0,4):
-              print(hex(B+off), hex(struct.unpack_from('<I',d,off)[0]))
-          print('\nBYTES 10b20-10b40',d[0x10b20:0x10b40].hex(' '))
+          src=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          assert len(src)==69096
+          assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
+          ks=Ks(KS_ARCH_ARM,KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
+          def asm(s,a):
+              enc,_=ks.asm(s,addr=a); return bytes(enc)
+
+          # Rebuild the exact hardware-validated TEST4 first.
+          golden=bytearray(src)
+          tfix=B+len(golden)
+          tfix_code=asm('''
+              ldrh r2, [r0, #0x1a]
+              movw r3, #0x3030
+              cmp r2, r3
+              ite eq
+              moveq r3, #1
+              movne r3, #0
+              adds r4, #0x16
+              b.w 0x080097c4
+          ''',tfix)
+          golden.extend(tfix_code)
+          while len(golden)%4: golden.append(0)
+          routefix=B+len(golden)
+          routefix_code=asm('''
+              mov r0, r4
+              ldrh r1, [r0, #4]
+              movw r2, #0x3030
+              cmp r1, r2
+              bne not_packet00
+              ldrb r3, [r0, #2]
+              movw r2, #0x3d82
+              movt r2, #0x2000
+              movs r1, #0
+              strb r1, [r2, r3]
+              bl 0x0800b4e0
+              pop {r4, pc}
+          not_packet00:
+              bx lr
+          ''',routefix)
+          golden.extend(routefix_code)
+          while len(golden)%4: golden.append(0)
+          golden[0x10d04:0x10d08]=asm(f'b.w 0x{tfix:08x}',B+0x10d04)
+          golden[0x10dd4:0x10dd8]=asm(f'b.w 0x{routefix:08x}',B+0x10dd4)
+          assert len(golden)==69152
+          gsha=hashlib.sha256(golden).hexdigest()
+          assert gsha=='7df8498e95e73df5a89f2a1d8989257bbcf279157e63e50ea73075482bc2d91b',gsha
+          print('GOLDEN_TEST4_SHA256',gsha)
+
+          # Common invariants from the known-booting default helper layer.
+          assert golden[0x10b24:0x10b29]==b'ME\x001\x00'
+          assert golden[0x10b29:0x10b38]==b'54.232.115.106'
+          assert golden[0x10b38:0x10b3d]==b'7050\x00'
+          assert golden[0xf5a2:0xf5b1]==b'24.232.246.134'
+          assert golden[0xf5b1:0xf5b7]==b'20000\x00'
+          # Existing default-IP helper: ID16 and ID18 both select new IP.
+          assert golden[0x10b96:0x10ba6]==bytes.fromhex('10 28 01 d0 12 28 01 d1 73 48 70 47 6c 48 70 47')
+          # Existing default-port helper: ID17 and ID19 both select 7050.
+          assert golden[0x10ba6:0x10bb6]==bytes.fromhex('11 28 01 d0 13 28 01 d1 70 48 70 47 6b 48 70 47')
+
+          # Variant ME=1: default ME 1.
+          # IP config ID16 -> original 24.232.246.134; ID18 -> 54.232.115.106.
+          # PORT config ID17 -> original 20000; ID19 -> 7050.
+          me1=bytearray(golden)
+          me1[0x10b98:0x10b9a]=asm('beq 0x08010ba2',B+0x10b98)
+          me1[0x10ba8:0x10baa]=asm('beq 0x08010bb2',B+0x10ba8)
+          assert me1[0x10b27]==ord('1')
+          # Decode branch targets as a guard.
+          i=list(md.disasm(bytes(me1[0x10b98:0x10b9a]),B+0x10b98))[0]
+          j=list(md.disasm(bytes(me1[0x10ba8:0x10baa]),B+0x10ba8))[0]
+          print('ME1_IP1_BRANCH',i.mnemonic,i.op_str)
+          print('ME1_PORT1_BRANCH',j.mnemonic,j.op_str)
+          assert '0x8010ba2' in i.op_str and '0x8010bb2' in j.op_str
+          n1='MA_196-GE-AR_DEFAULT_ME1_IP1_24.232.246.134_P20000_IP2_54.232.115.106_P7050.bin'
+          Path(n1).write_bytes(me1)
+
+          # Variant ME=2: both IP1/IP2 and ports use the new server; only default ME changes to 2.
+          me2=bytearray(golden)
+          me2[0x10b27]=ord('2')
+          assert me2[0x10b29:0x10b38]==b'54.232.115.106'
+          assert me2[0x10b38:0x10b3d]==b'7050\x00'
+          n2='MA_196-GE-AR_DEFAULT_ME2_IP1_54.232.115.106_P7050_IP2_54.232.115.106_P7050.bin'
+          Path(n2).write_bytes(me2)
+
+          # Ensure only intended existing bytes differ from golden.
+          d1=[i for i,(a,b) in enumerate(zip(golden,me1)) if a!=b]
+          d2=[i for i,(a,b) in enumerate(zip(golden,me2)) if a!=b]
+          print('ME1_DIFFS',[hex(x) for x in d1])
+          print('ME2_DIFFS',[hex(x) for x in d2])
+          assert set(d1).issubset({0x10b98,0x10b99,0x10ba8,0x10ba9})
+          assert d2==[0x10b27]
+          print('ME1_SHA256',hashlib.sha256(me1).hexdigest())
+          print('ME2_SHA256',hashlib.sha256(me2).hexdigest())
+          print('SIZE_ME1',len(me1),'SIZE_ME2',len(me2))
           PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MA196_DEFAULT_ME1_ME2_VALIDATED
+          path: |
+            MA_196-GE-AR_DEFAULT_ME1_IP1_24.232.246.134_P20000_IP2_54.232.115.106_P7050.bin
+            MA_196-GE-AR_DEFAULT_ME2_IP1_54.232.115.106_P7050_IP2_54.232.115.106_P7050.bin
+          if-no-files-found: error
