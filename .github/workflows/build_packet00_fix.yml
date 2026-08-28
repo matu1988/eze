@@ -1,4 +1,4 @@
-name: Diagnose ME getter reentrancy
+name: Diagnose config getter 79C4
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump ME getter and callers
+      - name: Dump config getter
         shell: bash
         run: |
           python -m pip install --quiet capstone
@@ -22,11 +22,8 @@ jobs:
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
           d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes(); B=0x08000000
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          def dump(s,e,title):
+          for s,e,title in [(0x7980,0x7A40,'0x080079C4 config getter'),(0x4740,0x4820,'0x080047C4 lock/access helper')]:
               print(f'\n===== {title} =====')
               for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          dump(0x10B20,0x10BA0,'ME getter 0x08010B3E and helpers')
-          dump(0x9DD0,0x9EA0,'Path B wider context')
-          dump(0x9640,0x9730,'Path A wider context')
           PY
