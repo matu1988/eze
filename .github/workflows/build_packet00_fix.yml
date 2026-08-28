@@ -1,4 +1,4 @@
-name: Analyze Known-Booting MA196 Versus MA193 GPRS
+name: Decode Known-Booting MA196 GPRS Helpers
 
 on:
   push:
@@ -13,43 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compare GPRS state machine and helper semantics
+      - name: Decode safe helper wrappers
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib
           from capstone import Cs,CS_ARCH_ARM,CS_MODE_THUMB,CS_MODE_LITTLE_ENDIAN
           B=0x08000000
-          o=Path('MA_193-GE-AR.bin').read_bytes()
-          k=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
+          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN);md.skipdata=True
-          print('193',len(o),hashlib.sha256(o).hexdigest())
-          print('KNOWN_BOOT',len(k),hashlib.sha256(k).hexdigest())
-          print('\nDIFFS IN GPRS 0x96CC-0x9812')
-          diffs=[i for i in range(0x96cc,0x9812) if o[i]!=k[i]]
-          print('count',len(diffs))
-          if diffs:
-            # group contiguous
-            groups=[]; s=p=diffs[0]
-            for x in diffs[1:]:
-              if x==p+1:p=x
-              else:groups.append((s,p+1));s=p=x
-            groups.append((s,p+1))
-            for a,b in groups:
-              print(hex(B+a),hex(B+b), '193',o[a:b].hex(' '),'known',k[a:b].hex(' '))
-          print('\n193 STATE MACHINE')
-          for i in md.disasm(o[0x96cc:0x9812],B+0x96cc): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          print('\nKNOWN STATE MACHINE')
-          for i in md.disasm(k[0x96cc:0x9812],B+0x96cc): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          print('\nB4C8-B500 193')
-          for i in md.disasm(o[0xb4c8:0xb500],B+0xb4c8): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          print('\nB4C8-B500 known')
-          for i in md.disasm(k[0xb4c8:0xb500],B+0xb4c8): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          # Compare all original-range differences and whether known build already hooks 9736/9754
-          all_d=[i for i in range(len(o)) if o[i]!=k[i]]
-          print('\nTOTAL_DIFF_ORIGINAL_RANGE',len(all_d))
-          for off in (0x9706,0x9714,0x9730,0x9736,0x9754,0x97c0,0xb4c8,0xb4e0):
-            print(hex(B+off),'193',o[off:off+24].hex(' '),'known',k[off:off+24].hex(' '))
+          for s,e,name in [
+            (0x10b80,0x10c20,'HELPERS 10B80-10C20'),
+            (0x10c20,0x10d20,'HELPERS 10C20-10D20'),
+            (0x10d20,0x10de8,'HELPERS 10D20-END')]:
+            print('\n###',name)
+            for i in md.disasm(d[s:e],B+s): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          # Print exact bytes and entry contexts for known hooks.
+          for off in (0x9736,0x9740,0x977a,0x97c0):
+            print('\nHOOKCTX',hex(B+off),d[off-8:off+20].hex(' '))
           PY
