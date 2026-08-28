@@ -1,4 +1,4 @@
-name: Trace TREG Timer Semantics
+name: Trace TREG Conversion
 
 on:
   push:
@@ -13,24 +13,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Dump timer and TREG routines
+      - name: Dump TREG conversion
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
-          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes()
-          B=0x08000000
+          d=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin').read_bytes(); B=0x08000000
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
           def dump(s,e,title):
-              print(f'\n===== {title} {B+s:08X}-{B+e:08X} =====')
+              print(f'\n===== {title} =====')
               for i in md.disasm(d[s:e],B+s):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          dump(0x3DC0,0x3E80,'timer 0x08003E0C')
-          dump(0x75D0,0x7670,'TREG getter 0x08007620')
-          dump(0x7350,0x73C0,'TREG load/init')
-          # exact original Packet00 callers and their cleanup/state transitions
-          dump(0x96E0,0x97E0,'Packet00 path A')
-          dump(0x9E30,0x9F50,'Packet00 path B')
+          dump(0x73B0,0x74A0,'TREG init continuation / literal pool')
+          dump(0xC150,0xC220,'parser 0x0800C1B8 context')
+          # Search BL targets to 0x7620 in whole image, and literal 0x20003BFC users
+          for target in [0x08007620,0x0800C1B8]:
+              print(f'\nCALLS TO {target:08X}')
+              for i in md.disasm(d,B):
+                  if i.mnemonic.startswith('bl') and i.op_str.lower() in (f'#0x{target:x}',f'0x{target:x}'):
+                      print(f'{i.address:08X}: {i.mnemonic} {i.op_str}')
           PY
