@@ -1,4 +1,4 @@
-name: Build Packet00 Boot-Safe Dual Path V6
+name: Analyze MA193 From Scratch
 
 on:
   push:
@@ -6,169 +6,98 @@ on:
       - '.github/workflows/build_packet00_fix.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  analyze:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build boot-safe dual-path firmware
+      - name: Static analysis MA193
         shell: bash
         run: |
-          python -m pip install --quiet capstone keystone-engine
+          python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib
-          from keystone import Ks, KS_ARCH_ARM, KS_MODE_THUMB, KS_MODE_LITTLE_ENDIAN
+          import hashlib, re, struct
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
 
-          BASE=0x08000000
-          SRC=Path('MA_196-GE-AR_PACKET00_SOLO_IP1_RESTO_IP1_IP2.bin')
-          OUT=Path('MA_196-GE-AR_PACKET00_IP1_TREG_BOOTSAFE_V6.bin')
-          src=SRC.read_bytes()
-          assert len(src)==69096, len(src)
-          assert hashlib.sha256(src).hexdigest()=='c12fdc4a58fe4a1cfa13f8de3981ac267039d8ca72c292e9ec8245bbb1a31f76'
-          d=bytearray(src)
+          B=0x08000000
+          p=Path('MA_193-GE-AR.bin')
+          d=p.read_bytes()
+          print('=== FILE ===')
+          print('size', len(d))
+          print('sha256', hashlib.sha256(d).hexdigest())
+          if len(d)>=8:
+              print('initial_sp', hex(struct.unpack_from('<I',d,0)[0]))
+              print('reset_vector', hex(struct.unpack_from('<I',d,4)[0]))
 
-          assert d[0x9714:0x9718] == bytes.fromhex('FF F7 E4 FA')
-          assert d[0x9E6C:0x9E70] == bytes.fromhex('FE F7 38 FF')
-          assert d[0x10C26:0x10C2A] == bytes.fromhex('FF F7 8A FF')
-          assert d[0x10DE0:0x10DE4] == bytes.fromhex('FA F7 7E FB')
+          print('\n=== ASCII STRINGS >=4 ===')
+          for m in re.finditer(rb'[ -~]{4,}', d):
+              s=m.group().decode('ascii','replace')
+              if any(k in s.upper() for k in ['TREG','IMEI','IP','PORT','AB','TEST','TST','ME','SERVER','HOST','RESET','PACK','GPRS','UDP']):
+                  print(f'{m.start():06X} {B+m.start():08X} {s}')
 
-          ks=Ks(KS_ARCH_ARM, KS_MODE_THUMB|KS_MODE_LITTLE_ENDIAN)
+          def find_bytes(blob):
+              out=[]; pos=0
+              while True:
+                  i=d.find(blob,pos)
+                  if i<0: break
+                  out.append(i); pos=i+1
+              return out
 
-          cache_off=len(d)
-          cache_addr=BASE+cache_off
-          cache_asm='''
-              push {r1,r2,r3,lr}
-              bl 0x08010b3e
-              movw r1, #0x43bc
-              movt r1, #0x2000
-              strb r0, [r1]
-              movw r2, #0x4d45
-              str r2, [r1, #4]
-              pop {r1,r2,r3,pc}
-          '''
-          cache,_=ks.asm(cache_asm, addr=cache_addr, as_bytes=True)
-          cache=bytes(cache)
-          d.extend(cache)
-          if len(d)&1:
-              d.append(0)
+          print('\n=== CONSTANT OCCURRENCES ===')
+          consts={
+              '3030_halfword': bytes.fromhex('30 30'),
+              '5063_halfword': bytes.fromhex('63 50'),
+              'TREG_ascii': b'TREG',
+              'ME_ascii': b'ME',
+              'IMEI_ascii': b'IMEI',
+          }
+          for name,blob in consts.items():
+              arr=find_bytes(blob)
+              print(name, [f'0x{x:X}' for x in arr])
 
-          hook,_=ks.asm(f'bl 0x{cache_addr:08x}', addr=BASE+0x10C26, as_bytes=True)
-          hook=bytes(hook); assert len(hook)==4
-          d[0x10C26:0x10C2A]=hook
-
-          wrap_off=len(d)
-          wrap_addr=BASE+wrap_off
-          wrap_asm='''
-              push {r3,r4,r5,r6,r7,lr}
-              mov r4, r0
-              mov r5, r1
-              mov r6, r2
-              mov r7, r3
-              movw r2, #0x43bc
-              movt r2, #0x2000
-              ldr r0, [r2, #4]
-              movw r1, #0x4d45
-              cmp r0, r1
-              bne original_path
-              ldrb r0, [r2]
-              cmp r0, #1
-              bne original_path
-              cmp r7, #0
-              beq disable_test
-              movw r2, #0x43b4
-              movt r2, #0x2000
-              ldr r1, [r2]
-              movw r0, #0x5354
-              movt r0, #0x3354
-              cmp r1, r0
-              beq state_ready
-              str r0, [r2]
-              movs r1, #0
-              str r1, [r2, #4]
-          state_ready:
-              movw r0, #0x43b8
-              movt r0, #0x2000
-              mov r1, r7
-              bl 0x08003e0c
-              cbz r0, no_fire
-              mov r0, r4
-              mov r1, r5
-              movw r2, #0x43b8
-              movt r2, #0x2000
-              mov r3, r7
-              bl 0x08008ce0
-              cbz r0, return_now
-              mov r5, r0
-              movw r0, #0x43b8
-              movt r0, #0x2000
-              movs r1, #0
-              str r1, [r0]
-              mov r0, r5
-              b return_now
-          no_fire:
-              movs r0, #0
-              b return_now
-          original_path:
-              mov r0, r4
-              mov r1, r5
-              mov r2, r6
-              mov r3, r7
-              bl 0x08008ce0
-              b return_now
-          disable_test:
-              movw r0, #0x43b4
-              movt r0, #0x2000
-              movs r1, #0
-              str r1, [r0]
-              str r1, [r0, #4]
-              movs r0, #0
-          return_now:
-              pop {r3,r4,r5,r6,r7,pc}
-          '''
-          wrapper,_=ks.asm(wrap_asm, addr=wrap_addr, as_bytes=True)
-          wrapper=bytes(wrapper)
-          d.extend(wrapper)
-
-          for off in (0x9714,0x9E6C):
-              h,_=ks.asm(f'bl 0x{wrap_addr:08x}', addr=BASE+off, as_bytes=True)
-              h=bytes(h); assert len(h)==4
-              d[off:off+4]=h
-
-          d[0x10DE0:0x10DE4]=bytes.fromhex('00 20 00 BF')
-
-          OUT.write_bytes(d)
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          print('SOURCE_SIZE',len(src))
-          print('OUTPUT_SIZE',len(d))
-          print('CACHE_ADDR',hex(cache_addr),'CACHE_SIZE',len(cache))
-          print('WRAP_ADDR',hex(wrap_addr),'WRAP_SIZE',len(wrapper))
-          print('SHA256',hashlib.sha256(d).hexdigest())
-          print('IMEI_ME_HOOK',d[0x10C26:0x10C2A].hex(' '))
-          print('HOOK_A',d[0x9714:0x9718].hex(' '))
-          print('HOOK_B',d[0x9E6C:0x9E70].hex(' '))
-          print('ROUTE_3030',d[0x10DE0:0x10DE4].hex(' '))
-          print('--- CACHE ---')
-          for i in md.disasm(cache,cache_addr): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
-          print('--- WRAPPER ---')
-          for i in md.disasm(wrapper,wrap_addr): print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+          md.detail=False
+          def dump(s,e,title):
+              s=max(0,s&~1); e=min(len(d),e)
+              print(f'\n=== {title} 0x{B+s:08X}-0x{B+e:08X} ===')
+              for i in md.disasm(d[s:e],B+s):
+                  print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
+
+          # Dump around each 3030/5063 constant occurrence where interpreting as code may reveal construction paths.
+          for off in find_bytes(bytes.fromhex('30 30')):
+              dump(off-80, off+96, f'around raw 3030 @ file+0x{off:X}')
+          for off in find_bytes(bytes.fromhex('63 50')):
+              dump(off-80, off+96, f'around raw 5063 @ file+0x{off:X}')
+
+          # Known regions from later binary are inspected only as reference points, without assuming equivalence.
+          for s,e,title in [
+              (0x3D40,0x3E40,'timer clock/deadline candidate'),
+              (0x72E0,0x7660,'configuration/TREG candidate'),
+              (0x8080,0x8F40,'event construction/generator candidate'),
+              (0x9000,0xA020,'event state machines candidate'),
+              (0xB300,0xB620,'route/transport candidate'),
+              (0xC000,0xC620,'configuration parser candidate'),
+          ]:
+              if s < len(d): dump(s,e,title)
+
+          # Compare original prefix against modified 196 only to identify historical patch locations; 193 remains source of truth.
+          q=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
+          if q.exists():
+              e=q.read_bytes()
+              n=min(len(d),len(e))
+              ranges=[]; start=None
+              for i in range(n):
+                  if d[i]!=e[i] and start is None: start=i
+                  elif d[i]==e[i] and start is not None:
+                      ranges.append((start,i)); start=None
+              if start is not None: ranges.append((start,n))
+              print('\n=== FORENSIC DIFF 193 vs old modified 196 (prefix only) ===')
+              print('196_size',len(e),'196_sha256',hashlib.sha256(e).hexdigest())
+              print('different_ranges_count',len(ranges))
+              for a,b in ranges[:200]:
+                  print(f'0x{a:05X}-0x{b-1:05X} len={b-a} 193={d[a:b].hex(" ")} 196={e[a:b].hex(" ")}')
+
           PY
-
-      - name: Commit firmware
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add MA_196-GE-AR_PACKET00_IP1_TREG_BOOTSAFE_V6.bin
-          git commit -m "Add boot-safe Packet00 dual-path V6" || true
-          git push
-
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: MA_196_PACKET00_BOOTSAFE_V6
-          path: MA_196-GE-AR_PACKET00_IP1_TREG_BOOTSAFE_V6.bin
-          if-no-files-found: error
