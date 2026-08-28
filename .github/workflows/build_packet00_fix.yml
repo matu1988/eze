@@ -1,4 +1,4 @@
-name: Analyze MA193 From Scratch
+name: Analyze MA193 Packet00 Core
 
 on:
   push:
@@ -13,91 +13,122 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Static analysis MA193
+      - name: Focused Packet00 analysis
         shell: bash
         run: |
           python -m pip install --quiet capstone
           python - <<'PY'
           from pathlib import Path
-          import hashlib, re, struct
+          import hashlib, struct, re
           from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
 
           B=0x08000000
-          p=Path('MA_193-GE-AR.bin')
-          d=p.read_bytes()
-          print('=== FILE ===')
-          print('size', len(d))
-          print('sha256', hashlib.sha256(d).hexdigest())
-          if len(d)>=8:
-              print('initial_sp', hex(struct.unpack_from('<I',d,0)[0]))
-              print('reset_vector', hex(struct.unpack_from('<I',d,4)[0]))
-
-          print('\n=== ASCII STRINGS >=4 ===')
-          for m in re.finditer(rb'[ -~]{4,}', d):
-              s=m.group().decode('ascii','replace')
-              if any(k in s.upper() for k in ['TREG','IMEI','IP','PORT','AB','TEST','TST','ME','SERVER','HOST','RESET','PACK','GPRS','UDP']):
-                  print(f'{m.start():06X} {B+m.start():08X} {s}')
-
-          def find_bytes(blob):
-              out=[]; pos=0
-              while True:
-                  i=d.find(blob,pos)
-                  if i<0: break
-                  out.append(i); pos=i+1
-              return out
-
-          print('\n=== CONSTANT OCCURRENCES ===')
-          consts={
-              '3030_halfword': bytes.fromhex('30 30'),
-              '5063_halfword': bytes.fromhex('63 50'),
-              'TREG_ascii': b'TREG',
-              'ME_ascii': b'ME',
-              'IMEI_ascii': b'IMEI',
-          }
-          for name,blob in consts.items():
-              arr=find_bytes(blob)
-              print(name, [f'0x{x:X}' for x in arr])
-
+          d=Path('MA_193-GE-AR.bin').read_bytes()
+          old=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin').read_bytes()
           md=Cs(CS_ARCH_ARM,CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN)
-          md.detail=False
-          def dump(s,e,title):
+          md.skipdata=True
+
+          print('META size=%d sha256=%s sp=%08X reset=%08X' % (
+              len(d), hashlib.sha256(d).hexdigest(),
+              struct.unpack_from('<I',d,0)[0], struct.unpack_from('<I',d,4)[0]))
+
+          def insns(s,e):
               s=max(0,s&~1); e=min(len(d),e)
-              print(f'\n=== {title} 0x{B+s:08X}-0x{B+e:08X} ===')
-              for i in md.disasm(d[s:e],B+s):
+              return list(md.disasm(d[s:e],B+s))
+
+          def dump(s,e,title):
+              print('\n### '+title)
+              for i in insns(s,e):
                   print(f'{i.address:08X}: {i.bytes.hex(" "):14} {i.mnemonic:8} {i.op_str}')
 
-          # Dump around each 3030/5063 constant occurrence where interpreting as code may reveal construction paths.
-          for off in find_bytes(bytes.fromhex('30 30')):
-              dump(off-80, off+96, f'around raw 3030 @ file+0x{off:X}')
-          for off in find_bytes(bytes.fromhex('63 50')):
-              dump(off-80, off+96, f'around raw 5063 @ file+0x{off:X}')
+          def same(s,e):
+              n=min(e,len(d),len(old))
+              return d[s:n]==old[s:n]
 
-          # Known regions from later binary are inspected only as reference points, without assuming equivalence.
-          for s,e,title in [
-              (0x3D40,0x3E40,'timer clock/deadline candidate'),
-              (0x72E0,0x7660,'configuration/TREG candidate'),
-              (0x8080,0x8F40,'event construction/generator candidate'),
-              (0x9000,0xA020,'event state machines candidate'),
-              (0xB300,0xB620,'route/transport candidate'),
-              (0xC000,0xC620,'configuration parser candidate'),
-          ]:
-              if s < len(d): dump(s,e,title)
+          # Confirm/reject all historical core offsets against pristine 193.
+          regions=[
+              (0x3D50,0x3D60,'clock'),
+              (0x3E0C,0x3E32,'deadline'),
+              (0x7380,0x7420,'TREG init'),
+              (0x7610,0x7630,'TREG getter'),
+              (0x8CD0,0x8D70,'Packet00 generator'),
+              (0x96D0,0x9740,'state path A'),
+              (0x9E20,0x9EA0,'state path B'),
+              (0xB4B0,0xB520,'route/send candidate'),
+          ]
+          print('\n### CORE RANGE EQUALITY 193 vs old196')
+          for s,e,name in regions:
+              print(f'{name}: {same(s,e)} 193sha={hashlib.sha256(d[s:min(e,len(d))]).hexdigest()[:16]}')
 
-          # Compare original prefix against modified 196 only to identify historical patch locations; 193 remains source of truth.
-          q=Path('MA_196-GE-AR_ME1_PACKET00_AB_IMEI60S_IP2_RESET24H_TEST.bin')
-          if q.exists():
-              e=q.read_bytes()
-              n=min(len(d),len(e))
-              ranges=[]; start=None
-              for i in range(n):
-                  if d[i]!=e[i] and start is None: start=i
-                  elif d[i]==e[i] and start is not None:
-                      ranges.append((start,i)); start=None
-              if start is not None: ranges.append((start,n))
-              print('\n=== FORENSIC DIFF 193 vs old modified 196 (prefix only) ===')
-              print('196_size',len(e),'196_sha256',hashlib.sha256(e).hexdigest())
-              print('different_ranges_count',len(ranges))
-              for a,b in ranges[:200]:
-                  print(f'0x{a:05X}-0x{b-1:05X} len={b-a} 193={d[a:b].hex(" ")} 196={e[a:b].hex(" ")}')
+          # TREG string and literal references.
+          print('\n### TREG STRINGS / POINTERS')
+          for key in (b'TREG',b'REG',b'TEST',b'ABON',b'IMEI'):
+              offs=[m.start() for m in re.finditer(re.escape(key),d)]
+              print(key.decode('ascii','ignore'), [f'{B+x:08X}' for x in offs])
+              for o in offs:
+                  ptr=struct.pack('<I',B+o)
+                  refs=[]; p=0
+                  while True:
+                      q=d.find(ptr,p)
+                      if q<0: break
+                      refs.append(q); p=q+1
+                  if refs: print(' ptrrefs',f'{B+o:08X}',[f'{B+x:08X}' for x in refs])
+
+          # Find all actual Thumb instructions containing 3030/5063 in core by disassembling windows every 2 bytes.
+          # We only print unique plausible instruction addresses.
+          print('\n### IMMEDIATE 0x3030 / 0x5063 INSTRUCTIONS')
+          found={}
+          for off in range(0x100,len(d)-4,2):
+              xs=list(md.disasm(d[off:off+4],B+off,1))
+              if not xs: continue
+              i=xs[0]
+              txt=(i.mnemonic+' '+i.op_str).lower()
+              if '0x3030' in txt or '0x5063' in txt:
+                  found[i.address]=(i.mnemonic,i.op_str,i.bytes.hex(' '))
+          for a,(m,o,b) in sorted(found.items()):
+              print(f'{a:08X}: {b:14} {m:8} {o}')
+
+          # Full verified core dumps.
+          dump(0x3D50,0x3D60,'CLOCK SOURCE')
+          dump(0x3E0C,0x3E34,'DEADLINE HELPER')
+          dump(0x7360,0x7420,'TREG LOAD/CONVERSION')
+          dump(0x7600,0x7640,'TREG GETTER AREA')
+          dump(0x8CC0,0x8D70,'PACKET00 GENERATOR FULL')
+          dump(0x96C0,0x9750,'PACKET00 STATE PATH A')
+          dump(0x9E20,0x9EB0,'PACKET00 STATE PATH B')
+          dump(0xB470,0xB540,'ROUTE / SEND AREA')
+
+          # Discover calls to important functions, using verified historical addresses only if their ranges matched.
+          targets=[0x08003D50,0x08003E0C,0x08007620,0x08008CE0,0x08004548,0x0800B4C8,0x0800B4E0]
+          print('\n### CALL SITES TO CORE TARGETS')
+          allins=insns(0x100,len(d))
+          for t in targets:
+              hits=[]
+              for i in allins:
+                  if i.mnemonic in ('bl','blx'):
+                      op=i.op_str.lower().replace('#','')
+                      if op==hex(t): hits.append(i.address)
+              print(f'{t:08X}:',[f'{x:08X}' for x in hits])
+
+          # Dump context of every call to Packet00 generator found above.
+          packet_calls=[]
+          for i in allins:
+              if i.mnemonic=='bl' and i.op_str.lower().replace('#','')==hex(0x08008CE0):
+                  packet_calls.append(i.address)
+          for a in packet_calls:
+              off=a-B
+              dump(off-28,off+44,f'CALLER CONTEXT {a:08X} -> 08008CE0')
+
+          # Identify every write/read of historical TREG global 0x20003BFC by searching literal value.
+          print('\n### LITERAL 0x20003BFC REFERENCES')
+          lit=struct.pack('<I',0x20003BFC)
+          p=0; refs=[]
+          while True:
+              q=d.find(lit,p)
+              if q<0: break
+              refs.append(q); p=q+1
+          print([f'{B+x:08X}' for x in refs])
+          for q in refs:
+              dump(q-40,q+24,f'AROUND TREG GLOBAL LITERAL {B+q:08X}')
 
           PY
