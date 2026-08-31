@@ -1,4 +1,4 @@
-name: Build Golden TEST4 ME1 ME2 Defaults
+name: Build TEST4 Dynamic ME Network Map
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Rebuild golden TEST4 and create default variants
+      - name: Rebuild golden TEST4 and remap network by current ME
         shell: bash
         run: |
           python -m pip install --quiet capstone keystone-engine
@@ -32,9 +32,10 @@ jobs:
           def asm(s,a):
               enc,_=ks.asm(s,addr=a); return bytes(enc)
 
-          golden=bytearray(src)
-          tfix=B+len(golden)
-          tfix_code=asm('''
+          # Rebuild exact hardware-validated TEST4 first.
+          out=bytearray(src)
+          tfix=B+len(out)
+          code=asm('''
               ldrh r2, [r0, #0x1a]
               movw r3, #0x3030
               cmp r2, r3
@@ -44,10 +45,10 @@ jobs:
               adds r4, #0x16
               b.w 0x080097c4
           ''',tfix)
-          golden.extend(tfix_code)
-          while len(golden)%4: golden.append(0)
-          routefix=B+len(golden)
-          routefix_code=asm('''
+          out.extend(code)
+          while len(out)%4: out.append(0)
+          routefix=B+len(out)
+          code=asm('''
               mov r0, r4
               ldrh r1, [r0, #4]
               movw r2, #0x3030
@@ -63,56 +64,119 @@ jobs:
           not_packet00:
               bx lr
           ''',routefix)
-          golden.extend(routefix_code)
-          while len(golden)%4: golden.append(0)
-          golden[0x10d04:0x10d08]=asm(f'b.w 0x{tfix:08x}',B+0x10d04)
-          golden[0x10dd4:0x10dd8]=asm(f'b.w 0x{routefix:08x}',B+0x10dd4)
-          assert len(golden)==69152
-          gsha=hashlib.sha256(golden).hexdigest()
-          assert gsha=='7df8498e95e73df5a89f2a1d8989257bbcf279157e63e50ea73075482bc2d91b',gsha
-          print('GOLDEN_TEST4_SHA256',gsha)
+          out.extend(code)
+          while len(out)%4: out.append(0)
+          out[0x10d04:0x10d08]=asm(f'b.w 0x{tfix:08x}',B+0x10d04)
+          out[0x10dd4:0x10dd8]=asm(f'b.w 0x{routefix:08x}',B+0x10dd4)
+          assert len(out)==69152
+          assert hashlib.sha256(out).hexdigest()=='7df8498e95e73df5a89f2a1d8989257bbcf279157e63e50ea73075482bc2d91b'
+          golden=bytes(out)
 
-          assert golden[0x10b24:0x10b29]==b'ME\x001\x00'
-          assert golden[0x10b29:0x10b38]==b'54.232.115.106\x00'
-          assert golden[0x10b38:0x10b3d]==b'7050\x00'
-          assert golden[0xf5a2:0xf5b1]==b'24.232.246.134\x00'
-          assert golden[0xf5b1:0xf5b7]==b'20000\x00'
-          assert golden[0x10b96:0x10ba6]==bytes.fromhex('10 28 01 d0 12 28 01 d1 73 48 70 47 6c 48 70 47')
-          assert golden[0x10ba6:0x10bb6]==bytes.fromhex('11 28 01 d0 13 28 01 d1 70 48 70 47 6b 48 70 47')
+          # IMPORTANT: keep ME key/default/storage and all switching logic untouched.
+          assert out[0x10b24:0x10b29]==b'ME\x001\x00'
+          me_bytes_before=bytes(out[0x10b24:0x10b54])
 
-          me1=bytearray(golden)
-          me1[0x10b98:0x10b9a]=asm('beq 0x08010ba2',B+0x10b98)
-          me1[0x10ba8:0x10baa]=asm('beq 0x08010bb2',B+0x10ba8)
-          assert me1[0x10b27]==ord('1')
-          i=list(md.disasm(bytes(me1[0x10b98:0x10b9a]),B+0x10b98))[0]
-          j=list(md.disasm(bytes(me1[0x10ba8:0x10baa]),B+0x10ba8))[0]
-          print('ME1_IP1_BRANCH',i.mnemonic,i.op_str)
-          print('ME1_PORT1_BRANCH',j.mnemonic,j.op_str)
-          assert '0x8010ba2' in i.op_str and '0x8010bb2' in j.op_str
-          n1='MA_196-GE-AR_DEFAULT_ME1_IP1_24.232.246.134_P20000_IP2_54.232.115.106_P7050.bin'
-          Path(n1).write_bytes(me1)
+          # Existing IP/PORT default helper entry points are already called from
+          # the native config getters at 0x7D5C/0x7D60. Replace only those helper
+          # bodies with branches to larger dynamic helpers appended below.
+          # Inputs: r0 = config ID (16=IP1,18=IP2; 17=PORT1,19=PORT2).
+          # Current ME is read by existing safe helper 0x08010B3E.
+          iphelper=B+len(out)
+          ipcode=asm('''
+              push {r4, lr}
+              mov r4, r0
+              bl 0x08010b3e
+              cmp r0, #0
+              beq me0
+              cmp r0, #1
+              beq me1
+              b me2
+          me0:
+              cmp r4, #0x10
+              beq orig_ip1
+              b orig_ip2
+          me1:
+              cmp r4, #0x10
+              beq orig_ip2
+              b new_ip
+          me2:
+              b new_ip
+          orig_ip1:
+              movw r0, #0xf593
+              movt r0, #0x0800
+              pop {r4, pc}
+          orig_ip2:
+              movw r0, #0xf5a2
+              movt r0, #0x0800
+              pop {r4, pc}
+          new_ip:
+              movw r0, #0x0b29
+              movt r0, #0x0801
+              pop {r4, pc}
+          ''',iphelper)
+          out.extend(ipcode)
+          while len(out)%4: out.append(0)
 
-          me2=bytearray(golden)
-          me2[0x10b27]=ord('2')
-          assert me2[0x10b29:0x10b38]==b'54.232.115.106\x00'
-          assert me2[0x10b38:0x10b3d]==b'7050\x00'
-          n2='MA_196-GE-AR_DEFAULT_ME2_IP1_54.232.115.106_P7050_IP2_54.232.115.106_P7050.bin'
-          Path(n2).write_bytes(me2)
+          porthelper=B+len(out)
+          portcode=asm('''
+              push {r4, lr}
+              mov r4, r0
+              bl 0x08010b3e
+              cmp r0, #0
+              beq orig_port
+              cmp r0, #1
+              beq me1
+              b new_port
+          me1:
+              cmp r4, #0x11
+              beq orig_port
+              b new_port
+          orig_port:
+              movw r0, #0xf5b1
+              movt r0, #0x0800
+              pop {r4, pc}
+          new_port:
+              movw r0, #0x0b38
+              movt r0, #0x0801
+              pop {r4, pc}
+          ''',porthelper)
+          out.extend(portcode)
+          while len(out)%4: out.append(0)
 
-          d1=[i for i,(a,b) in enumerate(zip(golden,me1)) if a!=b]
-          d2=[i for i,(a,b) in enumerate(zip(golden,me2)) if a!=b]
-          print('ME1_DIFFS',[hex(x) for x in d1])
-          print('ME2_DIFFS',[hex(x) for x in d2])
-          assert set(d1).issubset({0x10b98,0x10b99,0x10ba8,0x10ba9})
-          assert d2==[0x10b27]
-          print('ME1_SHA256',hashlib.sha256(me1).hexdigest())
-          print('ME2_SHA256',hashlib.sha256(me2).hexdigest())
-          print('SIZE_ME1',len(me1),'SIZE_ME2',len(me2))
+          # Only redirect the already-existing helper entry points.
+          out[0x10b96:0x10b9a]=asm(f'b.w 0x{iphelper:08x}',B+0x10b96)
+          out[0x10ba6:0x10baa]=asm(f'b.w 0x{porthelper:08x}',B+0x10ba6)
+
+          # Guards: ME storage/default and all event/TREG/IMEI logic are unchanged.
+          assert bytes(out[0x10b24:0x10b54])==me_bytes_before
+          assert out[0x96cc:0x9812]==golden[0x96cc:0x9812]
+          assert out[0x10ccc:0x10d04]==golden[0x10ccc:0x10d04]
+          assert out[0x10dc4:0x10dd4]==golden[0x10dc4:0x10dd4]
+          assert out[0x10de8:0x10e20]==golden[0x10de8:0x10e20]
+          assert out[0x3be8:0x3bec]==golden[0x3be8:0x3bec]
+          assert out[0x3b0c:0x3b10]==golden[0x3b0c:0x3b10]
+
+          # Verify the two redirects decode correctly.
+          for off,target in [(0x10b96,iphelper),(0x10ba6,porthelper)]:
+              ins=list(md.disasm(bytes(out[off:off+4]),B+off))[0]
+              print(hex(B+off),ins.mnemonic,ins.op_str,'target',hex(target))
+              assert ins.mnemonic=='b.w'
+
+          print('IPHELPER',hex(iphelper),'LEN',len(ipcode))
+          for i in md.disasm(ipcode,iphelper): print(f'{i.address:08X}: {i.mnemonic:8} {i.op_str}')
+          print('PORTHELPER',hex(porthelper),'LEN',len(portcode))
+          for i in md.disasm(portcode,porthelper): print(f'{i.address:08X}: {i.mnemonic:8} {i.op_str}')
+
+          name='MA_196-GE-AR_TEST4_ME_DYNAMIC_NETWORK_FINAL.bin'
+          Path(name).write_bytes(out)
+          print('OUT_SIZE',len(out))
+          print('OUT_SHA256',hashlib.sha256(out).hexdigest())
+          print('ME0 IP1=177.71.166.146:20000 IP2=24.232.246.134:20000')
+          print('ME1 IP1=24.232.246.134:20000 IP2=54.232.115.106:7050')
+          print('ME2 IP1=54.232.115.106:7050 IP2=54.232.115.106:7050')
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: MA196_DEFAULT_ME1_ME2_VALIDATED
-          path: |
-            MA_196-GE-AR_DEFAULT_ME1_IP1_24.232.246.134_P20000_IP2_54.232.115.106_P7050.bin
-            MA_196-GE-AR_DEFAULT_ME2_IP1_54.232.115.106_P7050_IP2_54.232.115.106_P7050.bin
+          name: MA196_TEST4_ME_DYNAMIC_NETWORK_FINAL
+          path: MA_196-GE-AR_TEST4_ME_DYNAMIC_NETWORK_FINAL.bin
           if-no-files-found: error
